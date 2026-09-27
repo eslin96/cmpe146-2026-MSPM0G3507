@@ -13,8 +13,44 @@
 
 enum class timer_peripheral : std::uintptr_t
 {
+  timer_g6 = 0x4086'8000UL,
   timer_g8 = 0x4009'0000UL,
   timer_g12 = 0x4087'0000UL,
+};
+
+enum class timer_channel : std::uint8_t
+{
+  channel_0 = 0,
+  channel_1,
+};
+
+struct pwm_pin
+{
+  timer_peripheral peripheral;
+  timer_channel channel;
+  std::uintptr_t pinmux_address;
+  std::uint32_t mux_index;
+};
+
+constexpr pwm_pin red_pin{
+  timer_peripheral::timer_g6,
+  timer_channel::channel_0,
+  0x4042'80E4UL,
+  5u
+};
+
+constexpr pwm_pin green_pin{
+  timer_peripheral::timer_g6,
+  timer_channel::channel_1,
+  0x4042'80E8UL,
+  5u
+};
+
+constexpr pwm_pin blue_pin{
+  timer_peripheral::timer_g8,
+  timer_channel::channel_1,
+  0x4042'80C8UL,
+  3u
 };
 
 enum class timer_reg : std::uintptr_t
@@ -23,9 +59,9 @@ enum class timer_reg : std::uintptr_t
   clkdiv  = 0x1000,
   clksel  = 0x1008,
 
-  ccpd = 0x1100,
+  ccpd    = 0x1100,
   cclkctl = 0x1108,
-  cps =  0x110C,
+  cps     = 0x110C,
 
   ctr     = 0x1800,
   ctrctl  = 0x1804,
@@ -35,6 +71,11 @@ enum class timer_reg : std::uintptr_t
   ccctl1  = 0x1834,
   octl1   = 0x1854,
   ccact1  = 0x1874,
+
+  cc0     = 0x1810,
+  ccctl0  = 0x1830,
+  octl0   = 0x1850,
+  ccact0  = 0x1870,
 };
 
 class mspm0_steady_clock : public lab2::steady_clock
@@ -114,106 +155,112 @@ private:
 class mspm0_pwm : public lab2::pwm
 {
 public:
-  explicit mspm0_pwm(std::uint32_t p_frequency)
+  mspm0_pwm(pwm_pin p_pin, std::uint32_t p_frequency)
+    : m_base(static_cast<std::uintptr_t>(p_pin.peripheral)),
+      m_channel(static_cast<std::uint32_t>(p_pin.channel))
   {
     constexpr std::uint32_t timer_frequency = 4'000'000;
 
-    auto const base =
-      static_cast<std::uintptr_t>(timer_peripheral::timer_g8);
-
     auto power_enable_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::pwren));
+        m_base + static_cast<std::uintptr_t>(timer_reg::pwren));
 
     auto clock_divider_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::clkdiv));
+        m_base + static_cast<std::uintptr_t>(timer_reg::clkdiv));
 
     auto clock_select_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::clksel));
+        m_base + static_cast<std::uintptr_t>(timer_reg::clksel));
 
     auto prescaler_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::cps));
+        m_base + static_cast<std::uintptr_t>(timer_reg::cps));
 
     auto counter_clock_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::cclkctl));
+        m_base + static_cast<std::uintptr_t>(timer_reg::cclkctl));
 
     auto load_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::load));
+        m_base + static_cast<std::uintptr_t>(timer_reg::load));
 
     auto counter_control_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::ctrctl));
+        m_base + static_cast<std::uintptr_t>(timer_reg::ctrctl));
 
     auto ccp_direction_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::ccpd));
+        m_base + static_cast<std::uintptr_t>(timer_reg::ccpd));
 
-    auto cc1_register =
+    auto cc_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::cc1));
+        m_base +
+        static_cast<std::uintptr_t>(timer_reg::cc0) +
+        (m_channel * 4u));
 
-    auto ccctl1_register =
+    auto ccctl_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::ccctl1));
+        m_base +
+        static_cast<std::uintptr_t>(timer_reg::ccctl0) +
+        (m_channel * 4u));
 
-    auto octl1_register =
+    auto octl_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::octl1));
+        m_base +
+        static_cast<std::uintptr_t>(timer_reg::octl0) +
+        (m_channel * 4u));
 
-    auto ccact1_register =
+    auto ccact_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::ccact1));
+        m_base +
+        static_cast<std::uintptr_t>(timer_reg::ccact0) +
+        (m_channel * 4u));
 
-    // PB22 = PINCM50 = 0x404280C4
-    auto pb22_pinmux =
-      reinterpret_cast<volatile std::uint32_t*>(0x4042'80C8UL);
+    auto pinmux_register =
+      reinterpret_cast<volatile std::uint32_t*>(
+        p_pin.pinmux_address);
 
-    // Enable TIMG8 power
+    // Enable timer power
     *power_enable_register = (0x26u << 24) | 1u;
 
-    // BUSCLK = 32 MHz
+    // Select BUSCLK
     *clock_select_register = (1u << 3);
 
-    // Divide by 8 -> 4 MHz timer clock
+    // 32 MHz / 8 = 4 MHz
     *clock_divider_register = 7u;
 
-    // No extra prescaling
+    // No additional prescaling
     *prescaler_register = 0u;
 
     // Enable timer clock
     *counter_clock_register = 1u;
 
-    // Connect PB22 to TIMG8_C1
-    // PC bit = 1, peripheral function = 3
-    *pb22_pinmux = (1u << 7) | 3u;
+    // Connect timer peripheral to the selected LED pin
+    *pinmux_register = (1u << 7) | p_pin.mux_index;
 
-    // Channel 1 is an output
-    *ccp_direction_register = (1u << 1);
+    // Set this capture/compare channel as an output
+    *ccp_direction_register |= (1u << m_channel);
 
-    // Channel 1 is used in compare mode
-    *ccctl1_register = 0u;
+    // Compare mode
+    *ccctl_register = 0u;
 
-    // Use the timer signal generator for the output
-    *octl1_register = 0u;
+    // Use timer output
+    *octl_register = 0u;
 
-    // At zero -> HIGH
-    // At compare while counting up -> LOW
-    *ccact1_register =
+    // HIGH at zero, LOW at compare
+    *ccact_register =
       (2u << 9) |
       1u;
 
-    // Compute the PWM period from the requested frequency
-    auto const period_ticks = timer_frequency / p_frequency;
+    // Calculate PWM period from requested frequency
+    auto const period_ticks =
+      timer_frequency / p_frequency;
 
     *load_register = period_ticks - 1u;
 
-    // Start at about 50% duty cycle
-    *cc1_register = *load_register / 2u;
+    // Start at 50%
+    *cc_register = *load_register / 2u;
 
     // Start at zero, count up, repeat, enable
     *counter_control_register =
@@ -233,23 +280,25 @@ private:
 
   void driver_duty_cycle(std::uint16_t p_duty_cycle) override
   {
-    auto const base =
-      static_cast<std::uintptr_t>(timer_peripheral::timer_g8);
-
     auto load_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::load));
+        m_base + static_cast<std::uintptr_t>(timer_reg::load));
 
-    auto cc1_register =
+    auto cc_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        base + static_cast<std::uintptr_t>(timer_reg::cc1));
+        m_base +
+        static_cast<std::uintptr_t>(timer_reg::cc0) +
+        (m_channel * 4u));
 
-    auto const load = static_cast<std::uint32_t>(*load_register);
+    auto const load =
+      static_cast<std::uint32_t>(*load_register);
 
-    *cc1_register =
+    *cc_register =
       (load * static_cast<std::uint32_t>(p_duty_cycle)) / 65535u;
   }
 
+  std::uintptr_t m_base;
+  std::uint32_t m_channel;
   std::uint32_t m_frequency = 0;
 };
 
@@ -277,6 +326,7 @@ private:
 int main()
 {
   using namespace std::chrono_literals;
+
   std::printf("Hello, World\n");
 
   // TODO(lab2, step 1): Implement lab2::steady_clock
@@ -292,13 +342,17 @@ int main()
 
   // TODO(lab2, step4): Test against an LED and see if you can control the
   // brightness
-  //fake_steady_clock clock;
+
+  // fake_steady_clock clock;
 
   mspm0_steady_clock clock;
 
-  mspm0_pwm blue_pwm(1'000);
+  mspm0_pwm red_pwm(red_pin, 1'000);
+  mspm0_pwm green_pwm(green_pin, 1'000);
+  mspm0_pwm blue_pwm(blue_pin, 1'000);
 
-   while (true) {
+  /*
+  while (true) {
     blue_pwm.duty_cycle(8'000);
     lab2::delay(clock, 1s);
 
@@ -308,24 +362,29 @@ int main()
     blue_pwm.duty_cycle(50'000);
     lab2::delay(clock, 1s);
   }
-  
+  */
+
   blue_pwm.duty_cycle(32'767);
-  //blue_pwm.duty_cycle(8'000);
-  //blue_pwm.duty_cycle(50'000);
-  //blue_pwm.duty_cycle(0);       // off
-  //blue_pwm.duty_cycle(65'535);  // full brightness
+
+  // blue_pwm.duty_cycle(8'000);
+  // blue_pwm.duty_cycle(50'000);
+  // blue_pwm.duty_cycle(0);       // off
+  // blue_pwm.duty_cycle(65'535);  // full brightness
 
   while (true) {
+    red_pwm.duty_cycle(50'000);
+    green_pwm.duty_cycle(0);
+    blue_pwm.duty_cycle(0);
+    lab2::delay(clock, 1s);
 
+    red_pwm.duty_cycle(0);
+    green_pwm.duty_cycle(50'000);
+    blue_pwm.duty_cycle(0);
     lab2::delay(clock, 1s);
-    std::printf("Sleep 1\n");
+
+    red_pwm.duty_cycle(0);
+    green_pwm.duty_cycle(0);
+    blue_pwm.duty_cycle(50'000);
     lab2::delay(clock, 1s);
-    std::printf("Sleep 2\n");
-    lab2::delay(clock, 1s);
-    std::printf("Sleep 3\n");
-    // TODO(lab2, step 5): Use the steady clock together with your PWM driver to
-    // animate the RGB LED as a continuous color wheel, as described in
-    // README.md.
   }
- 
 }
