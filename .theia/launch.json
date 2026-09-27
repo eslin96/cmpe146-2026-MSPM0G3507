@@ -45,6 +45,15 @@
                 "name": "lab6_uart_crc",
                 "resourceId": "/lab6_uart_crc"
             }
+        },
+        {
+            "name": "lab1_gpio",
+            "type": "ccs-debug",
+            "request": "launch",
+            "projectInfo": {
+                "name": "lab1_gpio",
+                "resourceId": "/lab1_gpio"
+            }
         }
     ]
 }
