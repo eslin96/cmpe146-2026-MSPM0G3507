@@ -1,3 +1,6 @@
+#include <array>
+#include <cstddef>
+#include <limits>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
@@ -77,6 +80,45 @@ enum class timer_reg : std::uintptr_t
   octl0   = 0x1850,
   ccact0  = 0x1870,
 };
+
+constexpr double custom_cosine(double x)
+{
+  double cos{ 1 }, pow{ x };
+
+  for (auto fac{ 1ull }, n{ 1ull }; n != 19; fac *= ++n, pow *= x) {
+    if ((n & 1) == 0) {
+      cos += (n & 2 ? -pow : pow) / fac;
+    }
+  }
+
+  return cos;
+}
+
+template<std::size_t CycleSteps>
+constexpr std::array<std::uint16_t, CycleSteps> generate_cosine_table()
+{
+  std::array<std::uint16_t, CycleSteps> samples{};
+
+  constexpr auto max =
+    std::numeric_limits<std::uint16_t>::max();
+
+  constexpr double pi = 3.14159265358979323846;
+  constexpr double phase_step =
+    (2.0 * pi) / CycleSteps;
+
+  for (std::size_t x = 0; x < CycleSteps; x++) {
+    auto const y =
+      (custom_cosine(phase_step * x) + 1.0) / 2.0;
+
+    samples[x] =
+      static_cast<std::uint16_t>(y * max);
+  }
+
+  return samples;
+}
+
+constexpr auto uint16_cosine2 =
+  generate_cosine_table<628>();
 
 class mspm0_steady_clock : public lab2::steady_clock
 {
@@ -364,7 +406,7 @@ int main()
   }
   */
 
-  blue_pwm.duty_cycle(32'767);
+  /*blue_pwm.duty_cycle(32'767);
 
   // blue_pwm.duty_cycle(8'000);
   // blue_pwm.duty_cycle(50'000);
@@ -386,5 +428,34 @@ int main()
     green_pwm.duty_cycle(0);
     blue_pwm.duty_cycle(50'000);
     lab2::delay(clock, 1s);
+  }*/
+
+  constexpr std::size_t phase_shift =
+  uint16_cosine2.size() / 3;
+
+  while (true) {
+    for (std::size_t i = 0;
+        i < uint16_cosine2.size();
+        i++) {
+
+      auto const red =
+        uint16_cosine2[i];
+
+      auto const green =
+        uint16_cosine2[
+          (i + phase_shift) % uint16_cosine2.size()
+        ];
+
+      auto const blue =
+        uint16_cosine2[
+          (i + (2 * phase_shift)) % uint16_cosine2.size()
+        ];
+
+      red_pwm.duty_cycle(red);
+      green_pwm.duty_cycle(green);
+      blue_pwm.duty_cycle(blue);
+
+      lab2::delay(clock, 5ms);
+    }
   }
 }
