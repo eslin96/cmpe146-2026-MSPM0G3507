@@ -15,6 +15,7 @@ private:
   static constexpr std::uintptr_t clock_divider_offset = 0x1000;
   static constexpr std::uintptr_t clock_select_offset = 0x1004;
   static constexpr std::uintptr_t clock_prescaler_and_divider_offset = 0x1108;
+  static constexpr std::uintptr_t spi_control_offset = 0x1100;
 
   bool driver_configure(settings const& p_settings) override
   {
@@ -29,7 +30,7 @@ private:
     *reset_control_register =
       (0xB1u << 24) | (1u << 1) | (1u << 0);
 
-    auto* reset_status_register =
+    auto *reset_status_register =
       reinterpret_cast<volatile std::uint32_t*>(
         spi0_base_add + reset_status_offset);
 
@@ -37,21 +38,43 @@ private:
     {
     }
 
-    auto* clock_select_register =
+    auto *clock_select_register =
       reinterpret_cast<volatile std::uint32_t*>(
         spi0_base_add + clock_select_offset);
 
     *clock_select_register = (1u << 3);
 
-    auto* clock_divider_register =
+    auto *clock_divider_register =
       reinterpret_cast<volatile std::uint32_t*>(
         spi0_base_add + clock_divider_offset);
 
     *clock_divider_register = 0u;
 
-    auto* clock_prescaler_and_divider_register =
+    auto *clock_prescaler_and_divider_register =
       reinterpret_cast<volatile std::uint32_t*>(
         spi0_base_add + clock_prescaler_and_divider_offset);
+
+    if (p_settings.clock_rate == 0) 
+    {
+      return false;
+    }
+
+    std::uint64_t denominator = 2u * static_cast<std::uint64_t>(p_settings.clock_rate);
+    std::uint64_t divider = (32'000'000u + denominator - 1u) / denominator; //round up (a + b - 1)/ b
+    std::uint64_t scr = divider -1u;
+
+    if (scr > 1023u) 
+    {
+      return false;
+    }
+
+    *clock_prescaler_and_divider_register = static_cast<std::uint32_t>(scr);
+
+    auto *spi_control_register =
+      reinterpret_cast<volatile std::uint32_t*>(
+        spi0_base_add + spi_control_offset);
+    
+
     return true;
   
   }
