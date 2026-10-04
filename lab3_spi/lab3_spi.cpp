@@ -8,6 +8,7 @@ class mspm0_spi : public lab3::spi
 
 private:
   static constexpr std::uintptr_t spi0_base_add = 0x40468000;
+  static constexpr std::uintptr_t iomux_base_add = 0x40428000;
 
   static constexpr std::uintptr_t power_enable_offset = 0x800;
   static constexpr std::uintptr_t reset_control_offset = 0x804;
@@ -17,6 +18,11 @@ private:
   static constexpr std::uintptr_t clock_prescaler_and_divider_offset = 0x1108;
   static constexpr std::uintptr_t spi_control_0_offset = 0x1100;
   static constexpr std::uintptr_t spi_control_1_offset = 0x1104;
+  static constexpr std::uintptr_t PINCM20_offset = 0x50; // PINCM1 starts at offset 0x04.
+// PA9 uses PINCM20, which is index 19.
+// PINCM20 offset = 0x04 + (19 * 4) = 0x50.
+  static constexpr std::uintptr_t PINCM21_offset = 0x54;
+  static constexpr std::uintptr_t PINCM22_offset = 0x58;
 
   bool driver_configure(settings const& p_settings) override
   {
@@ -101,10 +107,26 @@ private:
 
     *spi_control_1_register = control_value_1;
     
+    auto *PINCM20_register =
+      reinterpret_cast<volatile std::uint32_t*>(
+        iomux_base_add + PINCM20_offset);
 
-    //spi config will go here
-    //enable spi after pin config // *spi_control_1_register = control_value_1 | 1u;
+    *PINCM20_register = (1u << 7) | 3u; //
     
+    auto *PINCM21_register =
+      reinterpret_cast<volatile std::uint32_t*>(
+        iomux_base_add + PINCM21_offset);
+
+    *PINCM21_register = (1u << 18) | 3u; 
+
+    auto *PINCM22_register =
+      reinterpret_cast<volatile std::uint32_t*>(
+        iomux_base_add + PINCM22_offset);
+
+    *PINCM22_register = (1u << 7) | 3u;
+
+    *spi_control_1_register = control_value_1 | 1u;
+
     return true;
   
   }
