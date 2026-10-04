@@ -15,7 +15,8 @@ private:
   static constexpr std::uintptr_t clock_divider_offset = 0x1000;
   static constexpr std::uintptr_t clock_select_offset = 0x1004;
   static constexpr std::uintptr_t clock_prescaler_and_divider_offset = 0x1108;
-  static constexpr std::uintptr_t spi_control_offset = 0x1100;
+  static constexpr std::uintptr_t spi_control_0_offset = 0x1100;
+  static constexpr std::uintptr_t spi_control_1_offset = 0x1104;
 
   bool driver_configure(settings const& p_settings) override
   {
@@ -70,11 +71,35 @@ private:
 
     *clock_prescaler_and_divider_register = static_cast<std::uint32_t>(scr);
 
-    auto *spi_control_register =
+    auto *spi_control_0_register =
       reinterpret_cast<volatile std::uint32_t*>(
-        spi0_base_add + spi_control_offset);
+        spi0_base_add + spi_control_0_offset);
     
+    std::uint32_t control_value_0 = 7u;
 
+    if (p_settings.bus_mode == lab3::spi::mode::m0) 
+    {
+    }else if (p_settings.bus_mode == lab3::spi::mode::m1)
+    {
+      control_value_0 |= (1u << 9); //keep the value already contaims and also set bit 9
+    }else if (p_settings.bus_mode == lab3::spi::mode::m2) 
+    {
+      control_value_0 |= (1u << 8); 
+
+    }else if (p_settings.bus_mode == lab3::spi::mode::m3) 
+    {
+      control_value_0 |= (1u << 8) | (1u << 9);
+    }
+
+    *spi_control_0_register = control_value_0;
+
+    auto *spi_control_1_register =
+      reinterpret_cast<volatile std::uint32_t*>(
+        spi0_base_add + spi_control_1_offset);
+    
+    std::uint32_t control_value_1 = (1u << 2) | (1u << 4);
+
+    
     return true;
   
   }
