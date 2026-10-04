@@ -99,6 +99,11 @@ private:
     
     std::uint32_t control_value_1 = (1u << 2) | (1u << 4);
 
+    *spi_control_1_register = control_value_1;
+    
+
+    //spi config will go here
+    //enable spi after pin config // *spi_control_1_register = control_value_1 | 1u;
     
     return true;
   
