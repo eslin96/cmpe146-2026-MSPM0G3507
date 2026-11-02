@@ -1,5 +1,4 @@
 
-#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -10,13 +9,13 @@
 #include "../hal/accelerometer.hpp"
 #include "../hal/mspm0g_i2c.hpp"
 
-// Function declarations.
+// Functions used to configure the board.
 void configure_i2c1_pins();
 void delay_ms(std::uint32_t milliseconds);
 
 
-// Simple delay using the SysTick hardware timer.
-// Assumes a 32 MHz processor clock.
+// Delay using the SysTick timer.
+// This assumes the processor clock is 32 MHz.
 void delay_ms(std::uint32_t milliseconds)
 {
     constexpr std::uintptr_t systick_base = 0xE000E010UL;
@@ -56,12 +55,87 @@ class bmi160 : public lab4::accelerometer
 {
 public:
 
-    // Constructor: save the I2C bus and sensor address.
+    // Save the I2C bus and set up the sensor once.
     explicit bmi160(lab4::i2c& bus,
                     std::uint8_t address = 0x68)
         : m_bus(bus), m_address(address)
     {
+        m_ready = initialize();
     }
+
+
+    // Check if the sensor was initialized correctly.
+    bool ready() const
+    {
+        return m_ready;
+    }
+
+
+    // Check if the BMI160 is still responding.
+    bool check_connection()
+    {
+        std::array<std::uint8_t, 1> chip_id{};
+
+        if (!read_registers(0x00, chip_id)) {
+            return false;
+        }
+
+        return chip_id[0] == 0xD1;
+    }
+
+
+    // Read acceleration and display roll and pitch.
+    // Return false if the reading fails.
+    bool print_orientation()
+    {
+        if (!m_ready) {
+            return false;
+        }
+
+        auto acceleration = read();
+
+        // Check that the values are valid numbers.
+        if (!std::isfinite(acceleration.x) ||
+            !std::isfinite(acceleration.y) ||
+            !std::isfinite(acceleration.z)) {
+
+            return false;
+        }
+
+        float x = acceleration.x;
+        float y = acceleration.y;
+        float z = acceleration.z;
+
+        constexpr float degrees = 57.2957795f;
+
+        // Calculate roll and pitch.
+        float roll = std::atan2(y, z) * degrees;
+
+        float pitch =
+            std::atan2(-x, std::sqrt(y * y + z * z)) * degrees;
+
+        // Display acceleration in g.
+        std::printf("X: %+.3f g | Y: %+.3f g | Z: %+.3f g\n",
+                    static_cast<double>(x),
+                    static_cast<double>(y),
+                    static_cast<double>(z));
+
+        // Display orientation in degrees.
+        std::printf("Roll: %d deg | Pitch: %d deg\n\n",
+                    static_cast<int>(std::round(roll)),
+                    static_cast<int>(std::round(pitch)));
+
+        return true;
+    }
+
+
+private:
+
+    // Variables saved by the constructor.
+    lab4::i2c& m_bus;
+    std::uint8_t m_address;
+    bool m_ready = false;
+
 
     // Identify and configure the accelerometer.
     bool initialize()
@@ -74,6 +148,7 @@ public:
             return false;
         }
 
+        // The BMI160 should return 0xD1.
         if (chip_id[0] != 0xD1) {
             std::printf("Wrong chip ID: 0x%02X\n",
                         static_cast<unsigned>(chip_id[0]));
@@ -85,6 +160,7 @@ public:
             return false;
         }
 
+        // Give the accelerometer time to wake up.
         delay_ms(10);
 
         // Check the accelerometer power mode.
@@ -105,6 +181,7 @@ public:
             return false;
         }
 
+        // Allow the sensor to settle.
         delay_ms(20);
 
         // Display the configuration once.
@@ -125,69 +202,6 @@ public:
     }
 
 
-    // Read acceleration and display roll and pitch.
-    void print_orientation()
-    {
-        auto acceleration = read();
-
-        // Retry once if all three values are zero.
-        if (acceleration.x == 0 &&
-            acceleration.y == 0 &&
-            acceleration.z == 0) {
-
-            delay_ms(1);
-            acceleration = read();
-        }
-
-        // Check for invalid measurements.
-        if (!std::isfinite(acceleration.x) ||
-            !std::isfinite(acceleration.y) ||
-            !std::isfinite(acceleration.z)) {
-
-            std::printf("Acceleration read failed.\n");
-            return;
-        }
-
-        if (acceleration.x == 0 &&
-            acceleration.y == 0 &&
-            acceleration.z == 0) {
-
-            std::printf("Invalid acceleration data.\n");
-            return;
-        }
-
-        float x = acceleration.x;
-        float y = acceleration.y;
-        float z = acceleration.z;
-
-        constexpr float degrees = 57.2957795f;
-
-        // Calculate roll and pitch.
-        float roll = std::atan2(y, z) * degrees;
-
-        float pitch =
-            std::atan2(-x, std::sqrt(y * y + z * z)) * degrees;
-
-        // Display acceleration.
-        std::printf("X: %+.3f g | Y: %+.3f g | Z: %+.3f g\n",
-                    static_cast<double>(x),
-                    static_cast<double>(y),
-                    static_cast<double>(z));
-
-        // Display orientation.
-        std::printf("Roll: %d deg | Pitch: %d deg\n\n",
-                    static_cast<int>(std::round(roll)),
-                    static_cast<int>(std::round(pitch)));
-    }
-
-
-private:
-
-    // Variables saved by the constructor.
-    lab4::i2c& m_bus;
-    std::uint8_t m_address;
-
-
     // Read data from one or more BMI160 registers.
     bool read_registers(std::uint8_t reg,
                         std::span<std::uint8_t> data)
@@ -195,12 +209,14 @@ private:
         // Tell the sensor which register we want.
         std::array<std::uint8_t, 1> request{reg};
 
-        // Ask the professor's driver to read the data.
+        // Use the I2C driver provided by the professor.
         if (!m_bus.transaction(m_address, request, data)) {
             return false;
         }
 
-        // Temporary timing workaround from our tests.
+        // Temporary workaround from our earlier tests.
+        // The professor's driver may finish the transaction
+        // before every received byte is copied into our array.
         delay_ms(2);
 
         // I2C1 hardware register addresses.
@@ -214,14 +230,14 @@ private:
             reinterpret_cast<volatile std::uint32_t*>(
                 i2c1_base + 0x121C);
 
-        // Count unread bytes in the receive FIFO.
+        // Check how many bytes remain in the receive FIFO.
         std::size_t remaining = *fifo_status & 0x0F;
 
         if (remaining > data.size()) {
             return false;
         }
 
-        // Copy any remaining bytes into the data array.
+        // Copy any remaining bytes into our data array.
         for (std::size_t i = data.size() - remaining;
              i < data.size(); ++i) {
 
@@ -232,7 +248,7 @@ private:
     }
 
 
-    // Write a value to a BMI160 register.
+    // Write one value to a BMI160 register.
     bool write_register(std::uint8_t reg,
                         std::uint8_t value)
     {
@@ -248,7 +264,7 @@ private:
     {
         int value = (static_cast<int>(high) << 8) | low;
 
-        // Convert the measurement to a signed value.
+        // Convert the value into a signed number.
         if (value >= 32768) {
             value -= 65536;
         }
@@ -288,7 +304,7 @@ int main()
     // Configure PB2 and PB3 for I2C1.
     configure_i2c1_pins();
 
-    // Create the professor's I2C driver.
+    // Create the professor's I2C driver once.
     mspm0g_i2c bus(mspm0g_i2c::port::i2c1);
 
     // Enable interrupts.
@@ -303,20 +319,79 @@ int main()
         return 1;
     }
 
-    // Create the BMI160 using its constructor.
-    bmi160 sensor(bus);
-
+    // Give the sensor time after power-up.
     delay_ms(50);
 
-    // Initialize the accelerometer.
-    if (!sensor.initialize()) {
+    // Create and initialize the BMI160 using its constructor.
+    bmi160 sensor(bus);
+
+    if (!sensor.ready()) {
         std::printf("BMI160 initialization failed.\n");
         return 1;
     }
 
-    // Continuously read the sensor.
+    // Track successful and failed readings.
+    std::uint32_t good_reads = 0;
+    std::uint32_t bad_reads = 0;
+
+    bool sensor_healthy = true;
+
+    // Counters used for the heartbeat.
+    std::uint32_t heartbeat_count = 0;
+    std::uint32_t heartbeat_good = 0;
+    std::uint32_t heartbeat_bad = 0;
+
+    // Continuously read the accelerometer.
     while (true) {
-        sensor.print_orientation();
+
+        bool reading_ok = sensor.print_orientation();
+
+        if (reading_ok) {
+
+            good_reads++;
+            bad_reads = 0;
+            heartbeat_good++;
+
+            // Two good readings are needed to clear a warning.
+            if (!sensor_healthy && good_reads >= 2) {
+                sensor_healthy = true;
+                std::printf("BMI160 readings recovered.\n");
+            }
+
+        } else {
+
+            bad_reads++;
+            good_reads = 0;
+            heartbeat_bad++;
+
+            // Warn only after three failed readings in a row.
+            if (sensor_healthy && bad_reads >= 3) {
+                sensor_healthy = false;
+                std::printf("Warning: BMI160 readings are failing.\n");
+            }
+        }
+
+        heartbeat_count++;
+
+        // Check the sensor every 25 reading attempts.
+        if (heartbeat_count >= 25) {
+
+            bool connected = sensor.check_connection();
+
+            std::printf("Heartbeat: %s\n",
+                        connected ? "Sensor responding" :
+                                    "Sensor not responding");
+
+            std::printf("Readings: %lu good, %lu failed\n\n",
+                        static_cast<unsigned long>(heartbeat_good),
+                        static_cast<unsigned long>(heartbeat_bad));
+
+            heartbeat_count = 0;
+            heartbeat_good = 0;
+            heartbeat_bad = 0;
+        }
+
+        // Wait before taking the next reading.
         delay_ms(200);
     }
 }
@@ -355,7 +430,7 @@ void configure_i2c1_pins()
     // Peripheral function 4 connects PB2/PB3 to I2C1.
     constexpr std::uint32_t i2c_function = 4;
 
-    // Both pins need the same configuration.
+    // Both pins use the same configuration.
     std::uint32_t pin_config =
         (1U << periph_conn_bit) |
         (1U << pull_up_bit) |
