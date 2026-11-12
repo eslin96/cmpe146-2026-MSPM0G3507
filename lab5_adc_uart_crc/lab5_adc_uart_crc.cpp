@@ -309,22 +309,65 @@ enum class device_role : std::uint8_t
 constexpr device_role this_device = device_role::sensor;
 }  // namespace
 
+class test_serial : public lab6::serial
+{
+private:
 
+    std::array<std::uint8_t, 256> buffer{
+        0x32, 0xA5
+    };
+
+    bool driver_configure(const settings&) override
+    {
+        return true;
+    }
+
+    void driver_write(
+        std::span<const std::uint8_t>) override
+    {
+    }
+
+    std::span<const std::uint8_t>
+    driver_receive_buffer() override
+    {
+        return buffer;
+    }
+
+    std::size_t driver_receive_cursor() override
+    {
+        return 2;
+    }
+};
 
 int main()
 {
     std::printf("Lab 5 FreeRTOS Test\n");
 
-    // Create the semaphore.
+    // Create the binary semaphore.
     sample_request = xSemaphoreCreateBinaryStatic(
         &sample_request_storage);
 
-    // Create the queue.
+    // Create the temperature batch queue.
     batch_queue = xQueueCreateStatic(
         1,
         sizeof(temperature_batch),
         batch_queue_buffer,
         &batch_queue_storage);
+
+    // Create the temporary UART driver.
+    static test_serial uart;
+
+    lab6::serial* sensor_uart = &uart;
+
+    // Create the request task.
+    xTaskCreateStatic(
+        request_task,
+        "request_task",
+        task_stack_words,
+        sensor_uart,
+        tskIDLE_PRIORITY + 1,
+        request_task_stack,
+        &request_task_tcb);
 
     // Create the temporary sampler task.
     xTaskCreateStatic(
@@ -341,15 +384,12 @@ int main()
         transmit_task,
         "transmit_task",
         task_stack_words,
-        nullptr,
+        sensor_uart,
         tskIDLE_PRIORITY + 1,
         transmit_task_stack,
         &transmit_task_tcb);
 
-    // Simulate a request from the display board.
-    xSemaphoreGive(sample_request);
-
-    // Start the scheduler.
+    // Start the FreeRTOS scheduler.
     vTaskStartScheduler();
 
     while (true) {
