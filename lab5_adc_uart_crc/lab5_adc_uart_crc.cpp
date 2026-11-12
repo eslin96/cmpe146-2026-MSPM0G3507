@@ -68,8 +68,7 @@ using serial_driver = msp0g::msp0g_uart;
 // on-chip CRC accelerator - no DriverLib. Its output must match
 // crc32_software below for the same input. Check the accelerator's bit-order
 // options and whether it applies the final XOR.
-class crc32_hardware
-{};
+using crc32_hardware = lab6::crc32_hardware;
 
 // Supplied reference implementation - do not modify. This is the standard
 // reflected CRC-32 (IEEE 802.3 / zlib) algorithm, computed bit-by-bit in
