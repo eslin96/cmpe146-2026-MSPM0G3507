@@ -279,77 +279,58 @@ constexpr device_role this_device = device_role::sensor;
 }  // namespace
 
 
+
 int main()
 {
-    std::printf("Hello, World\n");
+    std::printf("Lab 5 CRC Test\n");
 
-    if constexpr (this_device == device_role::sensor) {
+    // Create the hardware and software CRC drivers.
+    crc32_hardware hardware_crc;
+    crc32_software software_crc;
 
-        // Create the binary semaphore.
-        sample_request = xSemaphoreCreateBinaryStatic(
-            &sample_request_storage);
+    // Standard CRC-32 test data.
+    std::array<std::uint8_t, 9> test_data{
+        '1', '2', '3', '4', '5',
+        '6', '7', '8', '9'
+    };
 
-        // Create the queue for one temperature batch.
-        batch_queue = xQueueCreateStatic(
-            1,
-            sizeof(temperature_batch),
-            batch_queue_buffer,
-            &batch_queue_storage);
+    // Calculate the hardware CRC.
+    hardware_crc.reset();
+    hardware_crc.update(test_data);
 
-        // Create one shared UART driver.
-        static serial_driver uart(
-            lab6::serial::settings{},
-            msp0g::uartx::uart1);
+    std::uint32_t hardware_result =
+        hardware_crc.checksum();
 
-        lab6::serial* sensor_uart = &uart;
+    // Calculate the software CRC.
+    software_crc.reset();
+    software_crc.update(test_data);
 
-        // Create the request task.
-        xTaskCreateStatic(
-            request_task,
-            "request_task",
-            task_stack_words,
-            sensor_uart,
-            tskIDLE_PRIORITY + 1,
-            request_task_stack,
-            &request_task_tcb);
+    std::uint32_t software_result =
+        software_crc.checksum();
 
-        // Create the sampler task.
-        xTaskCreateStatic(
-            sampler_task,
-            "sampler_task",
-            task_stack_words,
-            nullptr,
-            tskIDLE_PRIORITY + 1,
-            sampler_task_stack,
-            &sampler_task_tcb);
+    // Known correct CRC-32 value.
+    constexpr std::uint32_t expected = 0xCBF43926U;
 
-        // Create the transmit task.
-        xTaskCreateStatic(
-            transmit_task,
-            "transmit_task",
-            task_stack_words,
-            sensor_uart,
-            tskIDLE_PRIORITY + 1,
-            transmit_task_stack,
-            &transmit_task_tcb);
+    std::printf("Hardware CRC: 0x%08lX\n",
+                static_cast<unsigned long>(hardware_result));
+
+    std::printf("Software CRC: 0x%08lX\n",
+                static_cast<unsigned long>(software_result));
+
+    std::printf("Expected CRC: 0x%08lX\n",
+                static_cast<unsigned long>(expected));
+
+    if (hardware_result == expected &&
+        software_result == expected) {
+
+        std::printf("PASS: CRC results match!\n");
 
     } else {
 
-        // Create the display board task.
-        xTaskCreateStatic(
-            display_task,
-            "display_task",
-            task_stack_words,
-            nullptr,
-            tskIDLE_PRIORITY + 1,
-            display_task_stack,
-            &display_task_tcb);
+        std::printf("FAIL: CRC results do not match!\n");
     }
 
-    // Start the FreeRTOS scheduler.
-    vTaskStartScheduler();
-
-    // Only reached if the scheduler fails to start.
     while (true) {
     }
 }
+
