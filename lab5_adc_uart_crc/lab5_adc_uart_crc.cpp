@@ -270,6 +270,69 @@ private:
 };
 
 
+class corruption_button : public lab1::input_pin
+{
+public:
+    corruption_button()
+    {
+        // Enable power to GPIOB.
+        GPIOB->GPRCM.PWREN = (0x26U << 24) | 1U;
+
+        for (std::uint32_t i = 0; i < 16; ++i) {
+            __asm volatile("nop");
+        }
+
+        configure(settings{});
+    }
+
+private:
+    bool driver_configure(
+        settings const& p_settings) override
+    {
+        std::uint32_t pull = 0U;
+
+        switch (p_settings.resistor) {
+
+            case lab1::pin_resistor::none:
+                break;
+
+            case lab1::pin_resistor::pull_up:
+                pull = (1U << 17);
+                break;
+
+            case lab1::pin_resistor::pull_down:
+                pull = (1U << 16);
+                break;
+
+            default:
+                return false;
+        }
+
+        // Configure PB21 as an input.
+        GPIOB->DOECLR31_0 = (1U << 21);
+
+        IOMUX->SECCFG.PINCM[IOMUX_PINCM49] =
+            1U |
+            (1U << 7) |
+            (1U << 18) |
+            pull;
+
+        return true;
+    }
+
+    bool driver_level() override
+    {
+        return (GPIOB->DIN31_0 & (1U << 21)) != 0U;
+    }
+};
+
+bool corruption_button_held()
+{
+    static corruption_button button;
+
+    return !button.level();
+}
+
 // Dependencies supplied to Kaden's transmit task.
 struct transmit_task_context
 {
@@ -535,9 +598,9 @@ int main()
 
         // Provide the transmit task with its dependencies.
         static transmit_task_context transmit_context{
-            batch_queue,
-            sensor_uart,
-            nullptr
+        batch_queue,
+        sensor_uart,
+        corruption_button_held
         };
 
         // Create the transmit task.
