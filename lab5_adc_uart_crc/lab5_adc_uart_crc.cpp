@@ -189,8 +189,19 @@ void request_task(void* p_context)
 //   4. xQueueSend(batch_queue, &batch, portMAX_DELAY)
 void sampler_task(void*)
 {
-  while (true) {
-  }
+    temperature_batch batch{};
+
+    while (true) {
+
+        // Wait for a sample request.
+        xSemaphoreTake(sample_request, portMAX_DELAY);
+
+        // Generate 64 temporary temperature samples.
+        batch.fill(250);
+
+        // Send the batch to the transmitter.
+        xQueueSend(batch_queue, &batch, portMAX_DELAY);
+    }
 }
 
 // TODO(lab, role 3): Construct a crc32_hardware and a lab1::input_pin for
@@ -484,6 +495,79 @@ enum class device_role : std::uint8_t
   display,
 };
 
+
+class test_serial : public lab6::serial
+{
+private:
+    std::array<std::uint8_t, 2> rx_buffer{
+        0xA5, 0x00
+    };
+
+    std::size_t total_bytes = 0;
+    bool packet_correct = true;
+
+    bool driver_configure(settings const&) override
+    {
+        return true;
+    }
+
+    void driver_write(
+        std::span<std::uint8_t const> data) override
+    {
+        std::printf("UART write: %u bytes\n",
+            static_cast<unsigned>(data.size()));
+
+        // Expected CRC for our 64 samples.
+        std::array<std::uint8_t, 4> expected_crc{
+            0x31, 0xE6, 0x1F, 0x2E
+        };
+
+        for (auto byte : data) {
+
+            if (total_bytes < 128) {
+
+                std::uint8_t expected =
+                    (total_bytes % 2 == 0) ? 250 : 0;
+
+                if (byte != expected) {
+                    packet_correct = false;
+                }
+
+            } else if (total_bytes < 132) {
+
+                if (byte != expected_crc[total_bytes - 128]) {
+                    packet_correct = false;
+                }
+
+            } else {
+                packet_correct = false;
+            }
+
+            ++total_bytes;
+        }
+
+        if (total_bytes >= 132) {
+
+            if (packet_correct && total_bytes == 132) {
+                std::printf("PASS: Correct 132-byte packet!\n");
+            } else {
+                std::printf("FAIL: Incorrect packet!\n");
+            }
+        }
+    }
+
+    std::span<std::uint8_t const>
+    driver_receive_buffer() override
+    {
+        return rx_buffer;
+    }
+
+    std::size_t driver_receive_cursor() override
+    {
+        return 1;
+    }
+};
+
 constexpr device_role this_device = device_role::sensor;
 }  // namespace
 
@@ -507,9 +591,7 @@ int main()
             &batch_queue_storage);
 
         // Create one shared UART driver.
-        static serial_driver uart(
-            lab6::serial::settings{},
-            msp0g::uartx::uart1);
+        static test_serial uart;
 
         lab6::serial* sensor_uart = &uart;
 
