@@ -188,8 +188,16 @@ void request_task(void* p_context)
 //   4. xQueueSend(batch_queue, &batch, portMAX_DELAY)
 void sampler_task(void*)
 {
-  while (true) {
-  }
+    temperature_batch batch;
+
+    while (true) {
+
+        xSemaphoreTake(sample_request, portMAX_DELAY);
+
+        batch.fill(250);
+
+        xQueueSend(batch_queue, &batch, portMAX_DELAY);
+    }
 }
 
 // TODO(lab, role 3): Construct a crc32_hardware and a lab1::input_pin for
@@ -204,8 +212,32 @@ void sampler_task(void*)
 //      writes to the serial driver.
 void transmit_task(void*)
 {
-  while (true) {
-  }
+    temperature_batch batch;
+
+    while (true) {
+
+        xQueueReceive(batch_queue, &batch, portMAX_DELAY);
+
+        bool correct = true;
+
+        for (auto sample : batch) {
+            if (sample != 250) {
+                correct = false;
+            }
+        }
+
+        if (correct) {
+            std::printf("PASS: All 64 samples received correctly!\n");
+        } else {
+            std::printf("FAIL: Incorrect sample data!\n");
+        }
+
+        std::printf("First sample: %d\n",
+                    static_cast<int>(batch[0]));
+
+        std::printf("Last sample: %d\n",
+                    static_cast<int>(batch[63]));
+    }
 }
 
 // =============================================================================
@@ -278,77 +310,48 @@ constexpr device_role this_device = device_role::sensor;
 }  // namespace
 
 
+
 int main()
 {
-    std::printf("Hello, World\n");
+    std::printf("Lab 5 FreeRTOS Test\n");
 
-    if constexpr (this_device == device_role::sensor) {
+    // Create the semaphore.
+    sample_request = xSemaphoreCreateBinaryStatic(
+        &sample_request_storage);
 
-        // Create the binary semaphore.
-        sample_request = xSemaphoreCreateBinaryStatic(
-            &sample_request_storage);
+    // Create the queue.
+    batch_queue = xQueueCreateStatic(
+        1,
+        sizeof(temperature_batch),
+        batch_queue_buffer,
+        &batch_queue_storage);
 
-        // Create the queue for one temperature batch.
-        batch_queue = xQueueCreateStatic(
-            1,
-            sizeof(temperature_batch),
-            batch_queue_buffer,
-            &batch_queue_storage);
+    // Create the temporary sampler task.
+    xTaskCreateStatic(
+        sampler_task,
+        "sampler_task",
+        task_stack_words,
+        nullptr,
+        tskIDLE_PRIORITY + 1,
+        sampler_task_stack,
+        &sampler_task_tcb);
 
-        // Create one shared UART driver.
-        static serial_driver uart(
-            lab6::serial::settings{},
-            msp0g::uartx::uart1);
+    // Create the temporary transmit task.
+    xTaskCreateStatic(
+        transmit_task,
+        "transmit_task",
+        task_stack_words,
+        nullptr,
+        tskIDLE_PRIORITY + 1,
+        transmit_task_stack,
+        &transmit_task_tcb);
 
-        lab6::serial* sensor_uart = &uart;
+    // Simulate a request from the display board.
+    xSemaphoreGive(sample_request);
 
-        // Create the request task.
-        xTaskCreateStatic(
-            request_task,
-            "request_task",
-            task_stack_words,
-            sensor_uart,
-            tskIDLE_PRIORITY + 1,
-            request_task_stack,
-            &request_task_tcb);
-
-        // Create the sampler task.
-        xTaskCreateStatic(
-            sampler_task,
-            "sampler_task",
-            task_stack_words,
-            nullptr,
-            tskIDLE_PRIORITY + 1,
-            sampler_task_stack,
-            &sampler_task_tcb);
-
-        // Create the transmit task.
-        xTaskCreateStatic(
-            transmit_task,
-            "transmit_task",
-            task_stack_words,
-            sensor_uart,
-            tskIDLE_PRIORITY + 1,
-            transmit_task_stack,
-            &transmit_task_tcb);
-
-    } else {
-
-        // Create the display board task.
-        xTaskCreateStatic(
-            display_task,
-            "display_task",
-            task_stack_words,
-            nullptr,
-            tskIDLE_PRIORITY + 1,
-            display_task_stack,
-            &display_task_tcb);
-    }
-
-    // Start the FreeRTOS scheduler.
+    // Start the scheduler.
     vTaskStartScheduler();
 
-    // Only reached if the scheduler fails to start.
     while (true) {
     }
 }
