@@ -568,56 +568,74 @@ private:
 
     std::size_t total_bytes = 0;
     bool packet_correct = true;
+    bool packet_corrupted = false;
 
     bool driver_configure(settings const&) override
     {
         return true;
     }
 
-    void driver_write(
-        std::span<std::uint8_t const> data) override
-    {
-        std::printf("UART write: %u bytes\n",
-            static_cast<unsigned>(data.size()));
+    
+void driver_write(
+    std::span<std::uint8_t const> data) override
+{
+    std::printf("UART write: %u bytes\n",
+        static_cast<unsigned>(data.size()));
 
-        // Expected CRC for our 64 samples.
-        std::array<std::uint8_t, 4> expected_crc{
-            0x31, 0xE6, 0x1F, 0x2E
-        };
+    std::array<std::uint8_t, 4> expected_crc{
+        0x31, 0xE6, 0x1F, 0x2E
+    };
 
-        for (auto byte : data) {
+    for (auto byte : data) {
 
-            if (total_bytes < 128) {
+        if (total_bytes == 0) {
 
-                std::uint8_t expected =
-                    (total_bytes % 2 == 0) ? 250 : 0;
-
-                if (byte != expected) {
-                    packet_correct = false;
-                }
-
-            } else if (total_bytes < 132) {
-
-                if (byte != expected_crc[total_bytes - 128]) {
-                    packet_correct = false;
-                }
-
-            } else {
+            // The first byte can be normal or corrupted.
+            if (byte == 251) {
+                packet_corrupted = true;
+            } else if (byte != 250) {
                 packet_correct = false;
             }
 
-            ++total_bytes;
+        } else if (total_bytes < 128) {
+
+            std::uint8_t expected =
+                (total_bytes % 2 == 0) ? 250 : 0;
+
+            if (byte != expected) {
+                packet_correct = false;
+            }
+
+        } else if (total_bytes < 132) {
+
+            if (byte != expected_crc[total_bytes - 128]) {
+                packet_correct = false;
+            }
+
+        } else {
+            packet_correct = false;
         }
 
-        if (total_bytes >= 132) {
+        ++total_bytes;
+    }
 
-            if (packet_correct && total_bytes == 132) {
-                std::printf("PASS: Correct 132-byte packet!\n");
+    if (total_bytes >= 132) {
+
+        if (packet_correct && total_bytes == 132) {
+
+            if (packet_corrupted) {
+                std::printf(
+                    "PASS: Corrupted packet detected!\n");
             } else {
-                std::printf("FAIL: Incorrect packet!\n");
+                std::printf(
+                    "PASS: Normal packet received!\n");
             }
+
+        } else {
+            std::printf("FAIL: Incorrect packet!\n");
         }
     }
+}
 
     std::span<std::uint8_t const>
     driver_receive_buffer() override
