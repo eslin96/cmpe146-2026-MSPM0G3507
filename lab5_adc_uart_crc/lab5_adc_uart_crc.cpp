@@ -9,6 +9,7 @@
 #include "semphr.h"
 #include "task.h"
 
+
 #include <ti/driverlib/driverlib.h>
 
 #include "../hal/adc.hpp"
@@ -16,7 +17,7 @@
 #include "../hal/gpio.hpp"
 #include "../hal/serial.hpp"
 #include "../hal/timer.hpp"
-
+#include "msp0g_uart.hpp"
 // =============================================================================
 // Role 1: ADC
 // =============================================================================
@@ -54,8 +55,7 @@ extern "C" void ADC0_IRQHandler()
 //
 // Add the matching `extern "C" void UARTn_IRQHandler()` for the UART instance
 // you pick (UART0 through UART3).
-class serial_driver
-{};
+using serial_driver = msp0g::msp0g_uart;
 
 // =============================================================================
 // Role 3: CRC
@@ -134,11 +134,14 @@ constexpr std::size_t packet_size =
 // request_task -> sampler_task: "take a batch now". Carries no data.
 // TODO(lab, role 4): Create with xSemaphoreCreateBinaryStatic().
 SemaphoreHandle_t sample_request = nullptr;
+StaticSemaphore_t sample_request_storage;
 
 // sampler_task -> transmit_task: a copy of one temperature_batch.
 // TODO(lab, role 4): Create with xQueueCreateStatic(), depth 1, item size
 // sizeof(temperature_batch).
 QueueHandle_t batch_queue = nullptr;
+StaticQueue_t batch_queue_storage;
+std::uint8_t batch_queue_buffer[sizeof(temperature_batch)];
 
 // =============================================================================
 // Sensor board: tasks
@@ -148,10 +151,32 @@ QueueHandle_t batch_queue = nullptr;
 // receive_cursor() with the last position you read. When
 // sample_request_command arrives, xSemaphoreGive(sample_request). This task
 // only reads from the serial driver.
-void request_task(void*)
+void request_task(void* p_context)
 {
-  while (true) {
-  }
+    auto* uart = static_cast<lab6::serial*>(p_context);
+
+    auto buffer = uart->receive_buffer();
+
+    std::size_t read_cursor = 0;
+
+    while (true) {
+
+        std::size_t write_cursor = uart->receive_cursor();
+
+        while (read_cursor != write_cursor) {
+
+            std::uint8_t received_byte = buffer[read_cursor];
+
+            if (received_byte == sample_request_command) {
+                xSemaphoreGive(sample_request);
+            }
+
+            read_cursor = (read_cursor + 1) % buffer.size();
+        }
+
+        constexpr TickType_t delay_ticks = pdMS_TO_TICKS(5);
+        vTaskDelay(delay_ticks > 0 ? delay_ticks : 1);
+    }
 }
 
 // TODO(lab, role 1): Construct an adc_driver. Loop forever:
@@ -230,6 +255,19 @@ StackType_t display_task_stack[task_stack_words];
 // `-DDEVICE_ROLE=DEVICE_ROLE_SENSOR` added to the project's build flags -
 // rather than a hardcoded constant, so the role never has to be hand-edited
 // in source.
+
+// Sensor board: request task.
+StaticTask_t request_task_tcb;
+StackType_t request_task_stack[task_stack_words];
+
+// Sensor board: sampler task.
+StaticTask_t sampler_task_tcb;
+StackType_t sampler_task_stack[task_stack_words];
+
+// Sensor board: transmit task.
+StaticTask_t transmit_task_tcb;
+StackType_t transmit_task_stack[task_stack_words];
+
 enum class device_role : std::uint8_t
 {
   sensor,
@@ -239,33 +277,78 @@ enum class device_role : std::uint8_t
 constexpr device_role this_device = device_role::sensor;
 }  // namespace
 
+
 int main()
 {
-  std::printf("Hello, World\n");
+    std::printf("Hello, World\n");
 
-  if constexpr (this_device == device_role::sensor) {
-    // TODO(lab, role 4): Before the scheduler starts:
-    //   1. Create sample_request and batch_queue.
-    //   2. Create request_task, sampler_task, and transmit_task with
-    //      xTaskCreateStatic().
-    // request_task and transmit_task share one serial_driver. main()'s stack
-    // is reused once the scheduler starts, so don't make it a local here.
-  } else {
-    xTaskCreateStatic(display_task,
-                      "display_task",
-                      task_stack_words,
-                      nullptr,
-                      tskIDLE_PRIORITY + 1,
-                      display_task_stack,
-                      &display_task_tcb);
-  }
+    if constexpr (this_device == device_role::sensor) {
 
-  vTaskStartScheduler();
+        // Create the binary semaphore.
+        sample_request = xSemaphoreCreateBinaryStatic(
+            &sample_request_storage);
 
-  // Only reached if vTaskStartScheduler() itself fails to start. The
-  // idle/timer task memory callbacks required by
-  // configSUPPORT_STATIC_ALLOCATION are already supplied by the freertos_kernel
-  // project's dpl/StaticAllocs_freertos.c - don't redefine them here.
-  while (true) {
-  }
+        // Create the queue for one temperature batch.
+        batch_queue = xQueueCreateStatic(
+            1,
+            sizeof(temperature_batch),
+            batch_queue_buffer,
+            &batch_queue_storage);
+
+        // Create one shared UART driver.
+        static serial_driver uart(
+            lab6::serial::settings{},
+            msp0g::uartx::uart1);
+
+        lab6::serial* sensor_uart = &uart;
+
+        // Create the request task.
+        xTaskCreateStatic(
+            request_task,
+            "request_task",
+            task_stack_words,
+            sensor_uart,
+            tskIDLE_PRIORITY + 1,
+            request_task_stack,
+            &request_task_tcb);
+
+        // Create the sampler task.
+        xTaskCreateStatic(
+            sampler_task,
+            "sampler_task",
+            task_stack_words,
+            nullptr,
+            tskIDLE_PRIORITY + 1,
+            sampler_task_stack,
+            &sampler_task_tcb);
+
+        // Create the transmit task.
+        xTaskCreateStatic(
+            transmit_task,
+            "transmit_task",
+            task_stack_words,
+            sensor_uart,
+            tskIDLE_PRIORITY + 1,
+            transmit_task_stack,
+            &transmit_task_tcb);
+
+    } else {
+
+        // Create the display board task.
+        xTaskCreateStatic(
+            display_task,
+            "display_task",
+            task_stack_words,
+            nullptr,
+            tskIDLE_PRIORITY + 1,
+            display_task_stack,
+            &display_task_tcb);
+    }
+
+    // Start the FreeRTOS scheduler.
+    vTaskStartScheduler();
+
+    // Only reached if the scheduler fails to start.
+    while (true) {
+    }
 }
