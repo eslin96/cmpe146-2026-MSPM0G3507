@@ -203,11 +203,220 @@ void sampler_task(void*)
 //      the CRC no longer matches).
 //   4. Write the batch, then the CRC, with the serial driver. This task only
 //      writes to the serial driver.
-void transmit_task(void*)
+
+
+// Steady clock reused from Lab 2.
+// TIMG12 runs at 4 MHz with a 32 MHz BUSCLK.
+class mspm0_steady_clock : public lab2::steady_clock
 {
-  while (true) {
-  }
+private:
+    static constexpr std::uintptr_t timer_base =
+        0x4087'0000U;
+
+    static volatile std::uint32_t& reg(
+        std::uintptr_t offset)
+    {
+        return *reinterpret_cast<
+            volatile std::uint32_t*>(timer_base + offset);
+    }
+
+public:
+    mspm0_steady_clock()
+    {
+        // Enable power to TIMG12.
+        reg(0x0800) = (0x26U << 24) | 1U;
+
+        // Allow the peripheral to power up.
+        for (std::uint32_t i = 0; i < 16; ++i) {
+            __asm volatile("nop");
+        }
+
+        // Stop the timer before configuring it.
+        reg(0x1804) = 0U;
+
+        // Select BUSCLK.
+        reg(0x1008) = (1U << 3);
+
+        // Divide the clock by 8.
+        reg(0x1000) = 7U;
+
+        // No additional prescaling.
+        reg(0x110C) = 0U;
+
+        // Enable the timer clock.
+        reg(0x1108) = 1U;
+
+        // Use the full 32-bit counting range.
+        reg(0x1808) = 0xFFFF'FFFFU;
+
+        // Start at zero, count up, repeat, and enable.
+        reg(0x1804) =
+            (2U << 28) |
+            (2U << 4) |
+            (1U << 1) |
+            1U;
+    }
+
+private:
+    std::uint32_t driver_frequency() override
+    {
+        return 4'000'000U;
+    }
+
+    std::uint64_t driver_uptime() override
+    {
+        return reg(0x1800);
+    }
+};
+
+
+// Dependencies supplied to Kaden's transmit task.
+struct transmit_task_context
+{
+    QueueHandle_t batch_queue;
+    lab6::serial* uart;
+    bool (*corruption_button_held)();
+};
+
+
+// Kaden's CRC and transmit task.
+void transmit_task(void* p_parameters)
+{
+    auto* context =
+        static_cast<transmit_task_context*>(p_parameters);
+
+    if (context == nullptr ||
+        context->batch_queue == nullptr ||
+        context->uart == nullptr) {
+
+        std::printf("Invalid transmit task context\n");
+
+        while (true) {
+            vTaskDelay(1);
+        }
+    }
+
+    temperature_batch samples{};
+
+    crc32_hardware hardware_crc;
+    crc32_software software_crc;
+
+    mspm0_steady_clock clock;
+
+    while (true) {
+
+        // Wait for Dylan's temperature batch.
+        if (xQueueReceive(
+                context->batch_queue,
+                &samples,
+                portMAX_DELAY) != pdPASS) {
+
+            continue;
+        }
+
+        // Access the temperature samples as bytes.
+        auto const sample_bytes =
+            std::span<std::uint8_t const>{
+                reinterpret_cast<std::uint8_t const*>(
+                    samples.data()),
+                sizeof(samples)
+            };
+
+        // Calculate and benchmark hardware CRC.
+        hardware_crc.reset();
+
+        auto const hardware_start =
+            static_cast<std::uint32_t>(clock.uptime());
+
+        hardware_crc.update(sample_bytes);
+
+        auto const hardware_checksum =
+            hardware_crc.checksum();
+
+        std::uint32_t hardware_elapsed =
+            static_cast<std::uint32_t>(clock.uptime())
+            - hardware_start;
+
+        // Calculate and benchmark software CRC.
+        software_crc.reset();
+
+        auto const software_start =
+            static_cast<std::uint32_t>(clock.uptime());
+
+        software_crc.update(sample_bytes);
+
+        auto const software_checksum =
+            software_crc.checksum();
+
+        std::uint32_t software_elapsed =
+            static_cast<std::uint32_t>(clock.uptime())
+            - software_start;
+
+        // Print the measured timer counts.
+        std::printf(
+            "CRC hardware: %lu ticks, software: %lu ticks\n",
+            static_cast<unsigned long>(hardware_elapsed),
+            static_cast<unsigned long>(software_elapsed));
+
+        std::printf(
+            "Timer frequency: %lu Hz\n",
+            static_cast<unsigned long>(clock.frequency()));
+
+        // Compare the hardware and software results.
+        if (hardware_checksum != software_checksum) {
+
+            std::printf(
+                "CRC mismatch: HW=0x%08lX SW=0x%08lX\n",
+                static_cast<unsigned long>(
+                    hardware_checksum),
+                static_cast<unsigned long>(
+                    software_checksum));
+
+        } else {
+
+            std::printf("Hardware and software CRC match\n");
+        }
+
+        // Corrupt one bit after calculating the CRC.
+        if (context->corruption_button_held != nullptr &&
+            context->corruption_button_held()) {
+
+            auto* mutable_bytes =
+                reinterpret_cast<std::uint8_t*>(
+                    samples.data());
+
+            mutable_bytes[0] ^= 0x01U;
+
+            std::printf("CRC corruption test\n");
+        }
+
+        // Send the 128 bytes of temperature data.
+        context->uart->write(sample_bytes);
+
+        // Convert the CRC to four little-endian bytes.
+        std::array<std::uint8_t, 4> crc_bytes{
+            static_cast<std::uint8_t>(
+                hardware_checksum >> 0),
+
+            static_cast<std::uint8_t>(
+                hardware_checksum >> 8),
+
+            static_cast<std::uint8_t>(
+                hardware_checksum >> 16),
+
+            static_cast<std::uint8_t>(
+                hardware_checksum >> 24)
+        };
+
+        // Send the CRC after the temperature data.
+        context->uart->write(
+            std::span<std::uint8_t const>{
+                crc_bytes.data(),
+                crc_bytes.size()
+            });
+    }
 }
+
 
 // =============================================================================
 // Display board: task
@@ -279,6 +488,7 @@ constexpr device_role this_device = device_role::sensor;
 }  // namespace
 
 
+
 int main()
 {
     std::printf("Hello, World\n");
@@ -323,12 +533,19 @@ int main()
             sampler_task_stack,
             &sampler_task_tcb);
 
+        // Provide the transmit task with its dependencies.
+        static transmit_task_context transmit_context{
+            batch_queue,
+            sensor_uart,
+            nullptr
+        };
+
         // Create the transmit task.
         xTaskCreateStatic(
             transmit_task,
             "transmit_task",
             task_stack_words,
-            sensor_uart,
+            &transmit_context,
             tskIDLE_PRIORITY + 1,
             transmit_task_stack,
             &transmit_task_tcb);
