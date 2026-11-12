@@ -1,15 +1,31 @@
 // cspell:ignore VDDA IIDX DDEVICE
+// Lab 5: ADC + UART + CRC using FreeRTOS
+//
+// Team roles:
+//   Dylan (Role 1): ADC, DMA, temperature conversion, sampler_task().
+//   Koby  (Role 2): UART driver and physical UART testing.
+//   Kaden (Role 3): CRC driver, benchmark and transmit_task().
+//   Eslin (Role 4): Sensor task architecture, request_task(), semaphore,
+//                  queue, task storage and main().
+//   Sonal (Role 5): Display task, CRC validation and RGB LED response.
+//
+// Comments marked (Eslin) are my application work for check-off.
+// Comments marked (Eslin - integration) describe the support code I added
+// to connect and test my teammates' work. Their original roles stay the same.
+// The professor's instructions are kept for the team as a reference.
 
 #include <array>
 #include <cstdint>
 #include <cstdio>
 
+// (Eslin) FreeRTOS gives me the task, semaphore and queue interfaces.
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "semphr.h"
 #include "task.h"
 
-
+// DriverLib is required for Dylan's ADC/DMA driver. UART and CRC use
+// direct register access, not DriverLib functions or SysConfig.
 #include <ti/driverlib/driverlib.h>
 
 #include "../hal/adc.hpp"
@@ -21,7 +37,7 @@
 #include "msp0g_crc.hpp"
 
 // =============================================================================
-// Role 1: ADC
+// Role 1: ADC (Dylan)
 // =============================================================================
 
 // TODO(lab, role 1): Make this class inherit from and implement the
@@ -45,7 +61,7 @@ extern "C" void ADC0_IRQHandler()
 {}
 
 // =============================================================================
-// Role 2: UART
+// Role 2: UART (Koby)
 // =============================================================================
 
 // TODO(lab, role 2): Make this class inherit from and implement the
@@ -57,10 +73,13 @@ extern "C" void ADC0_IRQHandler()
 //
 // Add the matching `extern "C" void UARTn_IRQHandler()` for the UART instance
 // you pick (UART0 through UART3).
+// (Eslin - integration) Koby's implementation is in msp0g_uart.hpp/.cpp.
+// This alias lets the application use his driver through the serial interface.
+// Integrated and builds; physical UART TX/RX and pin setup still need testing.
 using serial_driver = msp0g::msp0g_uart;
 
 // =============================================================================
-// Role 3: CRC
+// Role 3: CRC (Kaden)
 // =============================================================================
 
 // TODO(lab, role 3): Make this class inherit from and implement the
@@ -68,6 +87,8 @@ using serial_driver = msp0g::msp0g_uart;
 // on-chip CRC accelerator - no DriverLib. Its output must match
 // crc32_software below for the same input. Check the accelerator's bit-order
 // options and whether it applies the final XOR.
+// (Eslin - integration) Kaden's implementation is in msp0g_crc.hpp/.cpp.
+// The standard CRC test passed on my LaunchPad (see lab5-crc-test).
 using crc32_hardware = lab6::crc32_hardware;
 
 // Supplied reference implementation - do not modify. This is the standard
@@ -121,65 +142,83 @@ constexpr std::size_t samples_per_batch = 64;
 // byte order.
 using temperature_sample_t = std::int16_t;
 
-// One batch of converted samples. This is the item type of batch_queue.
+// (Eslin) I use one array of 64 signed 16-bit samples as the queue item.
+// That gives me 128 bytes of temperature data in each batch.
 using temperature_batch = std::array<temperature_sample_t, samples_per_batch>;
 
-// A packet on the wire: the batch's bytes, followed by the 4-byte CRC-32.
+// Shared packet format: 128 sample bytes followed by 4 CRC bytes (132 total).
+// The current code sends the sample bytes in the MCU's little-endian order.
+// The temperature scale still needs to be agreed on by the whole team.
 constexpr std::size_t packet_size =
   sizeof(temperature_batch) + sizeof(std::uint32_t);
 
 // =============================================================================
-// Sensor board: semaphore and queue (role 4 creates these in main())
+// Sensor board: semaphore and queue (Eslin)
 // =============================================================================
 
-// request_task -> sampler_task: "take a batch now". Carries no data.
-// TODO(lab, role 4): Create with xSemaphoreCreateBinaryStatic().
-SemaphoreHandle_t sample_request = nullptr;
-StaticSemaphore_t sample_request_storage;
+// (Eslin) I use a binary semaphore to tell the sampler when to take a batch.
+// It carries a signal, not the temperature readings. I create it in main().
+SemaphoreHandle_t sample_request = nullptr;  // Handle used by the tasks.
+StaticSemaphore_t sample_request_storage;  // Memory for the semaphore itself.
 
-// sampler_task -> transmit_task: a copy of one temperature_batch.
-// TODO(lab, role 4): Create with xQueueCreateStatic(), depth 1, item size
-// sizeof(temperature_batch).
-QueueHandle_t batch_queue = nullptr;
-StaticQueue_t batch_queue_storage;
+// (Eslin) I use a queue to pass a complete batch from the sampler to the
+// transmitter. FreeRTOS copies the data so the tasks do not share one array.
+QueueHandle_t batch_queue = nullptr;  // Handle used to send and receive data.
+StaticQueue_t batch_queue_storage;  // Memory for the queue's control data.
+// One queue slot: enough space for the entire 64-sample array (128 bytes).
 std::uint8_t batch_queue_buffer[sizeof(temperature_batch)];
 
 // =============================================================================
 // Sensor board: tasks
 // =============================================================================
 
-// TODO(lab, role 4): Every few ms (vTaskDelay()), compare the serial driver's
-// receive_cursor() with the last position you read. When
-// sample_request_command arrives, xSemaphoreGive(sample_request). This task
-// only reads from the serial driver.
+// (Eslin) Request task: I watch the UART receive buffer for command 0xA5.
+// When it arrives, I give the semaphore so Dylan's sampler can take a batch.
+// This task only reads the UART; Kaden's transmit task handles writing.
 void request_task(void* p_context)
 {
+    // (Eslin) FreeRTOS passes my UART pointer as void*. I cast it back
+    // to lab6::serial* so I can call the serial interface's functions.
     auto* uart = static_cast<lab6::serial*>(p_context);
 
+    // Get a view of the driver's circular receive buffer, not a copy of it.
     auto buffer = uart->receive_buffer();
 
+    // Start reading at index 0. The UART is created before this task starts.
     std::size_t read_cursor = 0;
 
     while (true) {
 
+        // The UART driver updates this cursor as bytes arrive.
+        // It points to where the NEXT byte will be written.
         std::size_t write_cursor = uart->receive_cursor();
 
+        // Different cursors mean there are unread bytes in the buffer.
         while (read_cursor != write_cursor) {
 
+            // Read one byte from the position I have not processed yet.
             std::uint8_t received_byte = buffer[read_cursor];
 
+            // Only 0xA5 is a request. Other bytes are ignored.
             if (received_byte == sample_request_command) {
+                // Signal the sampler. If it is blocked on the semaphore,
+                // FreeRTOS makes it ready to run. No data is copied here.
                 xSemaphoreGive(sample_request);
             }
 
+            // Move to the next byte. Modulo wraps back to index 0 when
+            // I reach the end of the circular buffer.
             read_cursor = (read_cursor + 1) % buffer.size();
         }
 
+        // Convert 5 ms to scheduler ticks. Use at least one tick so the
+        // task blocks and other tasks can run, even if 5 ms rounds to zero.
         constexpr TickType_t delay_ticks = pdMS_TO_TICKS(5);
         vTaskDelay(delay_ticks > 0 ? delay_ticks : 1);
     }
 }
 
+// Dylan (Role 1): sampler_task() is still pending integration.
 // TODO(lab, role 1): Construct an adc_driver. Loop forever:
 //   1. xSemaphoreTake(sample_request, portMAX_DELAY)
 //   2. Fill a std::array<std::uint16_t, samples_per_batch> with one call to
@@ -193,6 +232,8 @@ void sampler_task(void*)
   }
 }
 
+// Kaden (Role 3): transmitter requirements from the professor (reference).
+// Integrated and tested with simulated samples and UART; real link pending.
 // TODO(lab, role 3): Construct a crc32_hardware and a lab1::input_pin for
 // your corruption-test button (S1 or S2). Loop forever:
 //   1. xQueueReceive(batch_queue, &batch, portMAX_DELAY)
@@ -204,15 +245,17 @@ void sampler_task(void*)
 //   4. Write the batch, then the CRC, with the serial driver. This task only
 //      writes to the serial driver.
 
-
-// Steady clock reused from Lab 2.
-// TIMG12 runs at 4 MHz with a 32 MHz BUSCLK.
+// (Eslin - integration) I adapted my Lab 2 steady clock for Kaden's benchmark.
+// TIMG12 counts at 4 MHz if BUSCLK is 32 MHz (one tick = 0.25 microseconds).
+// The constructor sets up the timer once, and uptime() reads its counter.
 class mspm0_steady_clock : public lab2::steady_clock
 {
 private:
     static constexpr std::uintptr_t timer_base =
         0x4087'0000U;
 
+    // Return the register at the base address plus its offset. Volatile
+    // keeps the compiler from treating hardware register reads as constant.
     static volatile std::uint32_t& reg(
         std::uintptr_t offset)
     {
@@ -223,7 +266,7 @@ private:
 public:
     mspm0_steady_clock()
     {
-        // Enable power to TIMG12.
+        // PWREN: bits 31:24 hold the unlock key 0x26; bit 0 enables power.
         reg(0x0800) = (0x26U << 24) | 1U;
 
         // Allow the peripheral to power up.
@@ -237,7 +280,7 @@ public:
         // Select BUSCLK.
         reg(0x1008) = (1U << 3);
 
-        // Divide the clock by 8.
+        // CLKDIV uses the divider minus one: 7 means divide BUSCLK by 8.
         reg(0x1000) = 7U;
 
         // No additional prescaling.
@@ -249,12 +292,12 @@ public:
         // Use the full 32-bit counting range.
         reg(0x1808) = 0xFFFF'FFFFU;
 
-        // Start at zero, count up, repeat, and enable.
+        // CTRCTL: start at zero, count up, repeat, and enable.
         reg(0x1804) =
-            (2U << 28) |
-            (2U << 4) |
-            (1U << 1) |
-            1U;
+            (2U << 28) |  // Start counter at zero on enable.
+            (2U << 4) |   // Count up.
+            (1U << 1) |   // Repeat after reaching LOAD.
+            1U;           // Enable counter.
     }
 
 private:
@@ -263,25 +306,30 @@ private:
         return 4'000'000U;
     }
 
+    // The interface returns uint64_t, but TIMG12's raw counter is 32-bit.
+    // The benchmark uses unsigned 32-bit subtraction across counter wrap.
     std::uint64_t driver_uptime() override
     {
         return reg(0x1800);
     }
 };
 
-
+// (Eslin - integration) I added the S2 input driver for Kaden's corruption
+// demonstration. S2 is PB21 and is active-low: pressed means LOW.
+// It implements the professor's lab1::input_pin interface using registers.
 class corruption_button : public lab1::input_pin
 {
 public:
     corruption_button()
     {
-        // Enable power to GPIOB.
+        // Unlock GPIOB's power register and enable the peripheral.
         GPIOB->GPRCM.PWREN = (0x26U << 24) | 1U;
 
         for (std::uint32_t i = 0; i < 16; ++i) {
             __asm volatile("nop");
         }
 
+        // The default input settings select an internal pull-up resistor.
         configure(settings{});
     }
 
@@ -308,9 +356,11 @@ private:
                 return false;
         }
 
-        // Configure PB21 as an input.
+        // Clear PB21's output-enable bit so it acts as an input.
         GPIOB->DOECLR31_0 = (1U << 21);
 
+        // PINCM49 is PB21. Select GPIO, connect the pin, enable the input
+        // buffer, and apply the requested pull resistor.
         IOMUX->SECCFG.PINCM[IOMUX_PINCM49] =
             1U |
             (1U << 7) |
@@ -322,18 +372,23 @@ private:
 
     bool driver_level() override
     {
+        // Mask all the other GPIOB pins and return PB21's electrical level.
         return (GPIOB->DIN31_0 & (1U << 21)) != 0U;
     }
 };
 
+// (Eslin - integration) Give the transmitter a simple function to check S2.
 bool corruption_button_held()
 {
+    // Static means I configure the button once, on the first call.
     static corruption_button button;
 
+    // Invert the electrical level so true means the button is pressed.
     return !button.level();
 }
 
-// Dependencies supplied to Kaden's transmit task.
+// (Eslin) I use Kaden's context structure to pass the queue, shared UART
+// and button function to his task through one FreeRTOS void* argument.
 struct transmit_task_context
 {
     QueueHandle_t batch_queue;
@@ -341,8 +396,7 @@ struct transmit_task_context
     bool (*corruption_button_held)();
 };
 
-
-// Kaden's CRC and transmit task.
+// Kaden (Role 3): CRC and transmit task, adapted during integration.
 void transmit_task(void* p_parameters)
 {
     auto* context =
@@ -385,7 +439,8 @@ void transmit_task(void* p_parameters)
                 sizeof(samples)
             };
 
-        // Calculate and benchmark hardware CRC.
+        // Calculate and benchmark hardware CRC. Reset happens before timing;
+        // the measured interval covers update() and checksum().
         hardware_crc.reset();
 
         auto const hardware_start =
@@ -440,7 +495,8 @@ void transmit_task(void* p_parameters)
             std::printf("Hardware and software CRC match\n");
         }
 
-        // Corrupt one bit after calculating the CRC.
+        // Corrupt one bit after calculating the CRC. The checksum stays
+        // unchanged, so the display board should detect the changed data.
         if (context->corruption_button_held != nullptr &&
             context->corruption_button_held()) {
 
@@ -480,11 +536,12 @@ void transmit_task(void* p_parameters)
     }
 }
 
-
 // =============================================================================
-// Display board: task
+// Display board: task (Sonal, Role 5)
 // =============================================================================
 
+// Sonal's display implementation is still pending integration.
+// Professor's original Role 4 instructions (display half of the application):
 // TODO(lab, role 4): Construct a serial_driver, a crc32_hardware, two
 // lab1::input_pin (S1 and S2), and three lab1::output_pin (the RGB LED).
 // Loop forever:
@@ -505,18 +562,20 @@ void display_task(void*)
 }
 
 // =============================================================================
-// Task storage
+// Task storage (Eslin)
 // =============================================================================
 
+// (Eslin) I reserve 512 StackType_t entries per task, not 512 bytes.
+// Each task needs its own stack for local variables and function calls.
+// Each TCB (task control block) stores the task's scheduling information.
+// The storage is static so it remains available for the lifetime of the tasks.
 // Resize task_stack_words if necessary. Crashes can be caused by stack
 // overflows.
 constexpr std::uint32_t task_stack_words = 512;
 
-// Display board: one task.
+// Display board: one task (Sonal's task uses this storage).
 StaticTask_t display_task_tcb;
 StackType_t display_task_stack[task_stack_words];
-
-// TODO(lab, role 4): Add a stack and TCB for each of the three sensor tasks.
 
 // This lab uses two boards playing different roles. Both roles live in this
 // one file, and `this_device` below picks which tasks main() creates.
@@ -529,6 +588,7 @@ StackType_t display_task_stack[task_stack_words];
 // rather than a hardcoded constant, so the role never has to be hand-edited
 // in source.
 
+// (Eslin) Give each of the three sensor tasks its own TCB and stack.
 // Sensor board: request task.
 StaticTask_t request_task_tcb;
 StackType_t request_task_stack[task_stack_words];
@@ -547,46 +607,56 @@ enum class device_role : std::uint8_t
   display,
 };
 
+// (Eslin) Select which application to build before flashing a board.
+// Sensor runs three tasks; display runs one. Change to display for Sonal's board.
 constexpr device_role this_device = device_role::sensor;
 }  // namespace
 
-
-
+// (Eslin) main() sets up the application before FreeRTOS starts scheduling.
 int main()
 {
     std::printf("Hello, World\n");
 
+    // The role is known at compile time, so only the selected setup runs.
     if constexpr (this_device == device_role::sensor) {
 
-        // Create the binary semaphore.
+        // Create the binary semaphore using the storage I reserved above.
+        // It starts empty; the sampler waits until request_task gives it.
         sample_request = xSemaphoreCreateBinaryStatic(
             &sample_request_storage);
 
-        // Create the queue for one temperature batch.
+        // (Eslin) Create a queue that can hold one complete temperature batch.
+        // The storage is already reserved, so FreeRTOS does not allocate it.
         batch_queue = xQueueCreateStatic(
-            1,
-            sizeof(temperature_batch),
-            batch_queue_buffer,
-            &batch_queue_storage);
+            1,                          // Number of items the queue holds.
+            sizeof(temperature_batch),  // Bytes copied for each item.
+            batch_queue_buffer,         // Memory for the actual data.
+            &batch_queue_storage);      // Memory for queue control information.
 
-        // Create one shared UART driver.
+        // (Eslin) Create one shared UART object using Koby's driver.
+        // Static keeps it alive for both tasks after the scheduler starts.
+        // UART1 is selected for now; Koby still needs to verify the pin setup
+        // and the physical TX/RX link with the team.
         static serial_driver uart(
-            lab6::serial::settings{},
+            lab6::serial::settings{},   // Default baud rate: 115200, 8N1.
             msp0g::uartx::uart1);
 
+        // Both tasks use the same driver through the professor's interface.
         lab6::serial* sensor_uart = &uart;
 
-        // Create the request task.
+        // (Eslin) Create the task that reads incoming UART requests.
+        // xTaskCreateStatic uses the stack and TCB I already reserved.
         xTaskCreateStatic(
-            request_task,
-            "request_task",
-            task_stack_words,
-            sensor_uart,
-            tskIDLE_PRIORITY + 1,
-            request_task_stack,
-            &request_task_tcb);
+            request_task,            // Function the scheduler will run.
+            "request_task",          // Task name for debugging.
+            task_stack_words,        // Stack depth in StackType_t entries.
+            sensor_uart,             // Pointer passed to the task as void*.
+            tskIDLE_PRIORITY + 1,    // One priority level above idle.
+            request_task_stack,      // This task's own stack.
+            &request_task_tcb);      // This task's own control block.
 
-        // Create the sampler task.
+        // (Eslin) Create Dylan's sampler task. It uses the shared semaphore
+        // and queue directly, so it does not need a context pointer (nullptr).
         xTaskCreateStatic(
             sampler_task,
             "sampler_task",
@@ -596,14 +666,17 @@ int main()
             sampler_task_stack,
             &sampler_task_tcb);
 
-        // Provide the transmit task with its dependencies.
+        // (Eslin) I pass Kaden the queue, the same UART, and the S2 function.
+        // Keep the context static so the pointer stays valid while tasks run.
         static transmit_task_context transmit_context{
-        batch_queue,
-        sensor_uart,
-        corruption_button_held
+            batch_queue,
+            sensor_uart,
+            corruption_button_held
         };
 
-        // Create the transmit task.
+        // (Eslin) Create the transmitter. It receives the address of the
+        // context instead of just the UART, so it can also access the queue.
+        // All three sensor tasks use the same priority and separate stacks.
         xTaskCreateStatic(
             transmit_task,
             "transmit_task",
@@ -615,7 +688,8 @@ int main()
 
     } else {
 
-        // Create the display board task.
+        // (Eslin) If building the display role, create only Sonal's task.
+        // The sensor tasks, semaphore and queue are not created in this branch.
         xTaskCreateStatic(
             display_task,
             "display_task",
@@ -626,10 +700,11 @@ int main()
             &display_task_tcb);
     }
 
-    // Start the FreeRTOS scheduler.
+    // (Eslin) Start the scheduler after all objects and tasks are ready.
+    // FreeRTOS now decides which ready task runs. This normally never returns.
     vTaskStartScheduler();
 
-    // Only reached if the scheduler fails to start.
+    // Stay here if the scheduler fails to start.
     while (true) {
     }
 }
