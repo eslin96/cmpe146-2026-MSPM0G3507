@@ -57,9 +57,9 @@ void crc32_hardware::driver_reset()
   reg(crcseed_offset) = initial_value;
 }
 
-void crc32_hardware::driver_update(std::span<std::uint8_t const> p_data)
+void crc32_hardware::driver_update(std::span<const std::uint8_t> p_data)
 {
-  for (auto const byte : p_data) {
+  for (const auto byte : p_data) {
     // Use an 8-bit write so each input element advances the CRC by one byte.
     byte_reg(crcin_offset) = byte;
   }

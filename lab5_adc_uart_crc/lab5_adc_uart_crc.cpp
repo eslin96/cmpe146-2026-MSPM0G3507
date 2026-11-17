@@ -1,32 +1,17 @@
 // cspell:ignore VDDA IIDX DDEVICE
-// Lab 5: ADC + UART + CRC using FreeRTOS
-//
-// Team roles:
-//   Dylan (Role 1): ADC, DMA, temperature conversion, sampler_task().
-//   Koby  (Role 2): UART driver and physical UART testing.
-//   Kaden (Role 3): CRC driver, benchmark and transmit_task().
-//   Eslin (Role 4): Sensor task architecture, request_task(), semaphore,
-//                  queue, task storage and main().
-//   Sonal (Role 5): Display task, CRC validation and RGB LED response.
-//
-// Comments marked (Eslin) identify my assigned sensor-task implementation.
-// Shared starter code and other roles are not marked with my name.
-// Integration notes describe adaptations made to connect the team code;
-// they are not part of my assigned Role 4 implementation.
-// The professor's instructions are kept for the team as a reference.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+//#include <span>
 
-// FreeRTOS headers supplied in the professor's starter code.
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "semphr.h"
 #include "task.h"
 
-// DriverLib is required for Dylan's ADC/DMA driver. UART and CRC use
-// direct register access, not DriverLib functions or SysConfig.
+
 #include <ti/driverlib/driverlib.h>
 
 #include "../hal/adc.hpp"
@@ -34,63 +19,106 @@
 #include "../hal/gpio.hpp"
 #include "../hal/serial.hpp"
 #include "../hal/timer.hpp"
-#include "msp0g_uart.hpp"
-#include "msp0g_crc.hpp"
+#include "../drivers/msp0g_adc.hpp"
+#include "../drivers/msp0g_crc.hpp"
+#include "../drivers/msp0g_gpio.hpp"
+#include "../drivers/msp0g_iomux.hpp"
+#include "../drivers/msp0g_timer.hpp"
+#include "../drivers/msp0g_uart.hpp"
 
-// =============================================================================
-// Role 1: ADC (Dylan)
-// =============================================================================
-
-// TODO(lab, role 1): Make this class inherit from and implement the
-// `lab5::adc16_stream` interface (`adc.hpp`) using DriverLib, wired to the
-// internal temperature sensor (ADC0 channel 11). Follow the "1. ADC" guide in
-// the README:
-//   - Constructor: power up ADC0, configure MEM0 for channel 11 against VDDA,
-//     set the sample time, and set up the ADC's DMA trigger and DMA channel.
-//   - driver_read(): re-arm the DMA for the given buffer, save the calling
-//     task's handle, start the conversion, then sleep with ulTaskNotifyTake()
-//     until ADC0_IRQHandler() wakes you. Upscale each 12-bit sample to 16 bits
-//     before returning.
-class adc_driver
-{};
-
-// TODO(lab, role 1): Store the handle of the task waiting in
-// adc_driver::driver_read() somewhere this handler can reach. When
-// DL_ADC12_getPendingInterrupt(ADC0) returns DL_ADC12_IIDX_DMA_DONE, wake that
-// task with vTaskNotifyGiveFromISR() and finish with portYIELD_FROM_ISR().
+// The ADC driver wakes the task that is blocked in msp0g_adc::read() when
+// the DMA transfer has completed.  The symbol name is the vector entry used
+// by the MSPM0 startup code.
 extern "C" void ADC0_IRQHandler()
-{}
+{
+  msp0g::msp0g_adc::handle_interrupt();
+}
 
 // =============================================================================
-// Role 2: UART (Koby)
+// Role 1: ADC
 // =============================================================================
 
-// TODO(lab, role 2): Make this class inherit from and implement the
-// `lab6::serial` interface (`serial.hpp`), written register-level - no
-// DriverLib. driver_configure() computes the baud rate dividers from the
-// requested settings. Reception fills a circular buffer from the UART's RX
-// interrupt; driver_receive_cursor() returns where the next byte will be
-// written. Make the buffer larger than one packet (256 bytes is safe).
-//
-// Add the matching `extern "C" void UARTn_IRQHandler()` for the UART instance
-// you pick (UART0 through UART3).
-// Integration note: Koby's implementation is in msp0g_uart.hpp/.cpp.
-// This alias lets the application use his driver through the serial interface.
-// Integrated and builds; physical UART TX/RX and pin setup still need testing.
+// The ADC driver is msp0g::msp0g_adc (msp0g_adc.hpp / msp0g_adc.cpp).
+namespace msp0g {
+
+/** @brief Samples per batch. Must match samples_per_batch in the app file. */
+inline constexpr std::size_t sampler_samples_per_batch = 64;
+
+/**
+ * @brief Semaphore and queue passed into sampler_task.
+ *
+ * The instance must have static storage duration.
+ */
+struct sampler_context
+{
+  SemaphoreHandle_t sample_request;
+  QueueHandle_t batch_queue;
+};
+
+/**
+ * @brief Wait for a request, sample, convert, and queue the batch.
+ *
+ * @param p_context Pointer to a static sampler_context. A null pointer parks
+ * the task; a FreeRTOS task must not return.
+ */
+void sampler_task(void* p_context)
+{
+  auto* context = static_cast<sampler_context*>(p_context);
+
+  if (context == nullptr) {
+    while (true) {
+      vTaskDelay(portMAX_DELAY);
+    }
+  }
+
+  msp0g_adc adc;
+  const std::uint16_t trim_sample = temperature_trim_sample();
+  std::array<std::uint16_t, sampler_samples_per_batch> raw_samples{};
+  std::array<temperature_sample_t, sampler_samples_per_batch> batch{};
+
+  while (true) {
+    xSemaphoreTake(context->sample_request, portMAX_DELAY);
+    adc.read(raw_samples);
+
+    std::int32_t sum = 0;
+    for (std::size_t i = 0; i < raw_samples.size(); i++) {
+      batch[i] = to_temperature(raw_samples[i], trim_sample);
+      sum += batch[i];
+    }
+
+    // Remove once the display board shows the temperature.
+    const std::int32_t average =
+      sum / static_cast<std::int32_t>(raw_samples.size());
+    std::printf("batch raw[0]=%u raw[63]=%u  %ld.%ld C\n",
+                static_cast<unsigned>(raw_samples[0]),
+                static_cast<unsigned>(raw_samples.back()),
+                static_cast<long>(average / 10),
+                static_cast<long>(average % 10));
+
+    xQueueSend(context->batch_queue, &batch, portMAX_DELAY);
+  }
+}
+
+}  // namespace msp0g
+
+// =============================================================================
+// Role 2: UART
+// =============================================================================
+
+// Role 2 lives in msp0g_uart.hpp / msp0g_uart.cpp. The constructor receives
+// the serial settings and the UART instance, applies the baud dividers, and
+// enables the RX interrupt. driver_configure() remains because lab6::serial
+// requires it, and the constructor applies the initial settings itself.
+
+//aliasing
 using serial_driver = msp0g::msp0g_uart;
 
 // =============================================================================
-// Role 3: CRC (Kaden)
+// Role 3: CRC
 // =============================================================================
 
-// TODO(lab, role 3): Make this class inherit from and implement the
-// `lab6::crc32` interface (`crc.hpp`), written register-level against the
-// on-chip CRC accelerator - no DriverLib. Its output must match
-// crc32_software below for the same input. Check the accelerator's bit-order
-// options and whether it applies the final XOR.
-// Integration note: Kaden's implementation is in msp0g_crc.hpp/.cpp.
-// The standard CRC test passed on the LaunchPad (see lab5-crc-test).
-using crc32_hardware = lab6::crc32_hardware;
+// Role 3's hardware driver is lab6::crc32_hardware in msp0g_crc.hpp. The
+// supplied software implementation is the benchmark reference.
 
 // Supplied reference implementation - do not modify. This is the standard
 // reflected CRC-32 (IEEE 802.3 / zlib) algorithm, computed bit-by-bit in
@@ -135,26 +163,46 @@ namespace {
 // a fresh batch of readings.
 constexpr std::uint8_t sample_request_command = 0xA5;
 
-constexpr std::size_t samples_per_batch = 64;
+constexpr std::size_t samples_per_batch =
+  msp0g::sampler_samples_per_batch;
 
-// TODO(lab, team): Agree on an encoding for a single temperature sample that
-// resolves at least 0.5 degC. A fixed-point scheme (e.g. int16_t in units of
-// 0.1 degC) or a float both work. Both boards must use the same encoding and
-// byte order.
-using temperature_sample_t = std::int16_t;
+// Signed fixed-point temperature in tenths of a degree Celsius. Both boards
+// use the MSPM0's little-endian byte order.
+using temperature_sample_t = msp0g::temperature_sample_t;
 
-// Shared starter-code type: one array of 64 signed 16-bit samples.
-// Each batch contains 128 bytes and is the item type of the sensor queue.
+// One batch of converted samples. This is the item type of batch_queue.
 using temperature_batch = std::array<temperature_sample_t, samples_per_batch>;
 
-// Shared packet format: 128 sample bytes followed by 4 CRC bytes (132 total).
-// The current code sends the sample bytes in the MCU's little-endian order.
-// The temperature scale still needs to be agreed on by the whole team.
+// A packet on the wire: the batch's bytes, followed by the 4-byte CRC-32.
 constexpr std::size_t packet_size =
   sizeof(temperature_batch) + sizeof(std::uint32_t);
 
+constexpr msp0g::iomux_config uart_tx_config{
+  .pincm = 23,
+  .pf_sel = 2,
+  .inena = msp0g::input_enable::disable,
+};
+
+constexpr msp0g::iomux_config uart_rx_config{
+  .pincm = 24,
+  .pf_sel = 2,
+  .inena = msp0g::input_enable::enable,
+};
+
+constexpr lab6::serial::settings uart_settings{
+  .baud_rate = 115'200,
+  .stop = lab6::serial::settings::stop_bits::one,
+  .parity = lab6::serial::settings::parity::none,
+};
+
+constexpr msp0g::gpio_pin sw1_pin{ msp0g::gpio_port::a, 18, 40 };
+constexpr msp0g::gpio_pin sw2_pin{ msp0g::gpio_port::b, 21, 49 };
+constexpr msp0g::gpio_pin blue_led_pin{ msp0g::gpio_port::b, 22, 50 };
+constexpr msp0g::gpio_pin red_led_pin{ msp0g::gpio_port::b, 26, 57 };
+constexpr msp0g::gpio_pin green_led_pin{ msp0g::gpio_port::b, 27, 58 };
+
 // =============================================================================
-// Sensor board: semaphore and queue (Eslin)
+// Sensor board: semaphore and queue (role 4 creates these in main())
 // =============================================================================
 
 // The professor supplies the handle for the binary semaphore.
@@ -177,7 +225,6 @@ std::uint8_t batch_queue_buffer[sizeof(temperature_batch)];
 // =============================================================================
 
 // (Eslin) Request task: I watch the UART receive buffer for command 0xA5.
-// When it arrives, I give the semaphore so Dylan's sampler can take a batch.
 // This task only reads the UART; Kaden's transmit task handles writing.
 void request_task(void* p_context)
 {
@@ -188,8 +235,9 @@ void request_task(void* p_context)
     // Get a view of the driver's circular receive buffer, not a copy of it.
     auto buffer = uart->receive_buffer();
 
-    // Start reading at index 0. The UART is created before this task starts.
-    std::size_t read_cursor = 0;
+    // Begin at the driver's current write position so bytes left over from
+    // before this task started are not interpreted as a new request.
+    std::size_t read_cursor = uart->receive_cursor();
 
     while (true) {
 
@@ -224,346 +272,272 @@ void request_task(void* p_context)
     }
 }
 
-// Dylan (Role 1): sampler_task() is still pending integration.
-// TODO(lab, role 1): Construct an adc_driver. Loop forever:
-//   1. xSemaphoreTake(sample_request, portMAX_DELAY)
-//   2. Fill a std::array<std::uint16_t, samples_per_batch> with one call to
-//      adc_driver::read() (one DMA transfer, one task sleep).
-//   3. Convert each raw sample into a temperature_batch. See "Temperature
-//      conversion" in the README for the calibration constants.
-//   4. xQueueSend(batch_queue, &batch, portMAX_DELAY)
-void sampler_task(void*)
-{
-  while (true) {
-  }
-}
-
-// Kaden (Role 3): transmitter requirements from the professor (reference).
-// Integrated and tested with simulated samples and UART; real link pending.
-// TODO(lab, role 3): Construct a crc32_hardware and a lab1::input_pin for
-// your corruption-test button (S1 or S2). Loop forever:
-//   1. xQueueReceive(batch_queue, &batch, portMAX_DELAY)
-//   2. Compute the CRC-32 over the batch's bytes with both crc32_hardware and
-//      crc32_software, timing each with a lab2::steady_clock. Print both
-//      durations.
-//   3. If the button is held, flip one bit in the batch (after the CRC, so
-//      the CRC no longer matches).
-//   4. Write the batch, then the CRC, with the serial driver. This task only
-//      writes to the serial driver.
-
-// Integration note (Role 3): Lab 2 steady clock adapted for Kaden's benchmark.
-// TIMG12 counts at 4 MHz if BUSCLK is 32 MHz (one tick = 0.25 microseconds).
-// The constructor sets up the timer once, and uptime() reads its counter.
-class mspm0_steady_clock : public lab2::steady_clock
-{
-private:
-    static constexpr std::uintptr_t timer_base =
-        0x4087'0000U;
-
-    // Return the register at the base address plus its offset. Volatile
-    // keeps the compiler from treating hardware register reads as constant.
-    static volatile std::uint32_t& reg(
-        std::uintptr_t offset)
-    {
-        return *reinterpret_cast<
-            volatile std::uint32_t*>(timer_base + offset);
-    }
-
-public:
-    mspm0_steady_clock()
-    {
-        // PWREN: bits 31:24 hold the unlock key 0x26; bit 0 enables power.
-        reg(0x0800) = (0x26U << 24) | 1U;
-
-        // Allow the peripheral to power up.
-        for (std::uint32_t i = 0; i < 16; ++i) {
-            __asm volatile("nop");
-        }
-
-        // Stop the timer before configuring it.
-        reg(0x1804) = 0U;
-
-        // Select BUSCLK.
-        reg(0x1008) = (1U << 3);
-
-        // CLKDIV uses the divider minus one: 7 means divide BUSCLK by 8.
-        reg(0x1000) = 7U;
-
-        // No additional prescaling.
-        reg(0x110C) = 0U;
-
-        // Enable the timer clock.
-        reg(0x1108) = 1U;
-
-        // Use the full 32-bit counting range.
-        reg(0x1808) = 0xFFFF'FFFFU;
-
-        // CTRCTL: start at zero, count up, repeat, and enable.
-        reg(0x1804) =
-            (2U << 28) |  // Start counter at zero on enable.
-            (2U << 4) |   // Count up.
-            (1U << 1) |   // Repeat after reaching LOAD.
-            1U;           // Enable counter.
-    }
-
-private:
-    std::uint32_t driver_frequency() override
-    {
-        return 4'000'000U;
-    }
-
-    // The interface returns uint64_t, but TIMG12's raw counter is 32-bit.
-    // The benchmark uses unsigned 32-bit subtraction across counter wrap.
-    std::uint64_t driver_uptime() override
-    {
-        return reg(0x1800);
-    }
-};
-
-// Integration note (Role 3): S2 input driver for the corruption demonstration.
-// S2 is PB21 and is active-low: pressed means LOW.
-// It implements the professor's lab1::input_pin interface using registers.
-class corruption_button : public lab1::input_pin
-{
-public:
-    corruption_button()
-    {
-        // Unlock GPIOB's power register and enable the peripheral.
-        GPIOB->GPRCM.PWREN = (0x26U << 24) | 1U;
-
-        for (std::uint32_t i = 0; i < 16; ++i) {
-            __asm volatile("nop");
-        }
-
-        // The default input settings select an internal pull-up resistor.
-        configure(settings{});
-    }
-
-private:
-    bool driver_configure(
-        settings const& p_settings) override
-    {
-        std::uint32_t pull = 0U;
-
-        switch (p_settings.resistor) {
-
-            case lab1::pin_resistor::none:
-                break;
-
-            case lab1::pin_resistor::pull_up:
-                pull = (1U << 17);
-                break;
-
-            case lab1::pin_resistor::pull_down:
-                pull = (1U << 16);
-                break;
-
-            default:
-                return false;
-        }
-
-        // Clear PB21's output-enable bit so it acts as an input.
-        GPIOB->DOECLR31_0 = (1U << 21);
-
-        // PINCM49 is PB21. Select GPIO, connect the pin, enable the input
-        // buffer, and apply the requested pull resistor.
-        IOMUX->SECCFG.PINCM[IOMUX_PINCM49] =
-            1U |
-            (1U << 7) |
-            (1U << 18) |
-            pull;
-
-        return true;
-    }
-
-    bool driver_level() override
-    {
-        // Mask all the other GPIOB pins and return PB21's electrical level.
-        return (GPIOB->DIN31_0 & (1U << 21)) != 0U;
-    }
-};
-
 // Integration note (Role 3): callback used by the transmitter to check S2.
 bool corruption_button_held()
 {
-    // Static means the button is configured once, on the first call.
-    static corruption_button button;
+  // Static means the button is configured once, on the first call.
+  static msp0g::msp0g_inpin button(
+    sw2_pin, { .resistor = lab1::pin_resistor::pull_up });
 
-    // Invert the electrical level so true means the button is pressed.
-    return !button.level();
+  // Invert the electrical level so true means the button is pressed.
+  return !button.level();
 }
 
 // Kaden's context structure (Role 3), used by the sensor setup in main().
 // It groups the queue, shared UART and button callback into one task argument.
 struct transmit_task_context
 {
-    QueueHandle_t batch_queue;
-    lab6::serial* uart;
-    bool (*corruption_button_held)();
+  QueueHandle_t batch_queue;
+  lab6::serial* uart;
+  bool (*corruption_button_held)();
 };
 
 // Kaden (Role 3): CRC and transmit task, adapted during integration.
 void transmit_task(void* p_parameters)
 {
-    auto* context =
-        static_cast<transmit_task_context*>(p_parameters);
+  auto* context = static_cast<transmit_task_context*>(p_parameters);
 
-    if (context == nullptr ||
-        context->batch_queue == nullptr ||
-        context->uart == nullptr) {
-
-        std::printf("Invalid transmit task context\n");
-
-        while (true) {
-            vTaskDelay(1);
-        }
-    }
-
-    temperature_batch samples{};
-
-    crc32_hardware hardware_crc;
-    crc32_software software_crc;
-
-    mspm0_steady_clock clock;
+  if (context == nullptr || context->batch_queue == nullptr ||
+      context->uart == nullptr) {
+    std::printf("Invalid transmit task context\n");
 
     while (true) {
-
-        // Wait for Dylan's temperature batch.
-        if (xQueueReceive(
-                context->batch_queue,
-                &samples,
-                portMAX_DELAY) != pdPASS) {
-
-            continue;
-        }
-
-        // Access the temperature samples as bytes.
-        auto const sample_bytes =
-            std::span<std::uint8_t const>{
-                reinterpret_cast<std::uint8_t const*>(
-                    samples.data()),
-                sizeof(samples)
-            };
-
-        // Calculate and benchmark hardware CRC. Reset happens before timing;
-        // the measured interval covers update() and checksum().
-        hardware_crc.reset();
-
-        auto const hardware_start =
-            static_cast<std::uint32_t>(clock.uptime());
-
-        hardware_crc.update(sample_bytes);
-
-        auto const hardware_checksum =
-            hardware_crc.checksum();
-
-        std::uint32_t hardware_elapsed =
-            static_cast<std::uint32_t>(clock.uptime())
-            - hardware_start;
-
-        // Calculate and benchmark software CRC.
-        software_crc.reset();
-
-        auto const software_start =
-            static_cast<std::uint32_t>(clock.uptime());
-
-        software_crc.update(sample_bytes);
-
-        auto const software_checksum =
-            software_crc.checksum();
-
-        std::uint32_t software_elapsed =
-            static_cast<std::uint32_t>(clock.uptime())
-            - software_start;
-
-        // Print the measured timer counts.
-        std::printf(
-            "CRC hardware: %lu ticks, software: %lu ticks\n",
-            static_cast<unsigned long>(hardware_elapsed),
-            static_cast<unsigned long>(software_elapsed));
-
-        std::printf(
-            "Timer frequency: %lu Hz\n",
-            static_cast<unsigned long>(clock.frequency()));
-
-        // Compare the hardware and software results.
-        if (hardware_checksum != software_checksum) {
-
-            std::printf(
-                "CRC mismatch: HW=0x%08lX SW=0x%08lX\n",
-                static_cast<unsigned long>(
-                    hardware_checksum),
-                static_cast<unsigned long>(
-                    software_checksum));
-
-        } else {
-
-            std::printf("Hardware and software CRC match\n");
-        }
-
-        // Corrupt one bit after calculating the CRC. The checksum stays
-        // unchanged, so the display board should detect the changed data.
-        if (context->corruption_button_held != nullptr &&
-            context->corruption_button_held()) {
-
-            auto* mutable_bytes =
-                reinterpret_cast<std::uint8_t*>(
-                    samples.data());
-
-            mutable_bytes[0] ^= 0x01U;
-
-            std::printf("CRC corruption test\n");
-        }
-
-        // Send the 128 bytes of temperature data.
-        context->uart->write(sample_bytes);
-
-        // Convert the CRC to four little-endian bytes.
-        std::array<std::uint8_t, 4> crc_bytes{
-            static_cast<std::uint8_t>(
-                hardware_checksum >> 0),
-
-            static_cast<std::uint8_t>(
-                hardware_checksum >> 8),
-
-            static_cast<std::uint8_t>(
-                hardware_checksum >> 16),
-
-            static_cast<std::uint8_t>(
-                hardware_checksum >> 24)
-        };
-
-        // Send the CRC after the temperature data.
-        context->uart->write(
-            std::span<std::uint8_t const>{
-                crc_bytes.data(),
-                crc_bytes.size()
-            });
+      vTaskDelay(1);
     }
+  }
+
+  temperature_batch samples{};
+
+  lab6::crc32_hardware hardware_crc;
+  crc32_software software_crc;
+
+  msp0g::msp0g_steady_clock clock;
+
+  while (true) {
+    // Wait for Dylan's temperature batch.
+    if (xQueueReceive(context->batch_queue,
+                      &samples,
+                      portMAX_DELAY) != pdPASS) {
+      continue;
+    }
+
+    // Access the temperature samples as bytes.
+    auto const sample_bytes = std::span<std::uint8_t const>{
+      reinterpret_cast<std::uint8_t const*>(samples.data()), sizeof(samples)
+    };
+
+    // Calculate and benchmark hardware CRC. Reset happens before timing;
+    // the measured interval covers update() and checksum().
+    hardware_crc.reset();
+
+    auto const hardware_start =
+      static_cast<std::uint32_t>(clock.uptime());
+
+    hardware_crc.update(sample_bytes);
+
+    auto const hardware_checksum = hardware_crc.checksum();
+
+    std::uint32_t hardware_elapsed =
+      static_cast<std::uint32_t>(clock.uptime()) - hardware_start;
+
+    // Calculate and benchmark software CRC.
+    software_crc.reset();
+
+    auto const software_start =
+      static_cast<std::uint32_t>(clock.uptime());
+
+    software_crc.update(sample_bytes);
+
+    auto const software_checksum = software_crc.checksum();
+
+    std::uint32_t software_elapsed =
+      static_cast<std::uint32_t>(clock.uptime()) - software_start;
+
+    // Print the measured timer counts.
+    std::printf("CRC hardware: %lu ticks, software: %lu ticks\n",
+                static_cast<unsigned long>(hardware_elapsed),
+                static_cast<unsigned long>(software_elapsed));
+
+    std::printf("Timer frequency: %lu Hz\n",
+                static_cast<unsigned long>(clock.frequency()));
+
+    // Compare the hardware and software results.
+    if (hardware_checksum != software_checksum) {
+      std::printf("CRC mismatch: HW=0x%08lX SW=0x%08lX\n",
+                  static_cast<unsigned long>(hardware_checksum),
+                  static_cast<unsigned long>(software_checksum));
+    } else {
+      std::printf("Hardware and software CRC match\n");
+    }
+
+    // Corrupt one bit after calculating the CRC. The checksum stays
+    // unchanged, so the display board should detect the changed data.
+    if (context->corruption_button_held != nullptr &&
+        context->corruption_button_held()) {
+      auto* mutable_bytes =
+        reinterpret_cast<std::uint8_t*>(samples.data());
+
+      mutable_bytes[0] ^= 0x01U;
+
+      std::printf("CRC corruption test\n");
+    }
+
+    // Send the 128 bytes of temperature data.
+    context->uart->write(sample_bytes);
+
+    // Convert the CRC to four little-endian bytes.
+    std::array<std::uint8_t, 4> crc_bytes{
+      static_cast<std::uint8_t>(hardware_checksum >> 0),
+      static_cast<std::uint8_t>(hardware_checksum >> 8),
+      static_cast<std::uint8_t>(hardware_checksum >> 16),
+      static_cast<std::uint8_t>(hardware_checksum >> 24)
+    };
+
+    // Send the CRC after the temperature data.
+    context->uart->write(
+      std::span<std::uint8_t const>{ crc_bytes.data(), crc_bytes.size() });
+  }
 }
 
 // =============================================================================
-// Display board: task (Sonal, Role 5)
+// Display board: task
 // =============================================================================
 
-// Sonal's display implementation is still pending integration.
-// Professor's original Role 4 instructions (display half of the application):
-// TODO(lab, role 4): Construct a serial_driver, a crc32_hardware, two
-// lab1::input_pin (S1 and S2), and three lab1::output_pin (the RGB LED).
-// Loop forever:
-//   1. Wait for S1 or S2 to be pressed.
-//   2. Save the current receive_cursor(), then write sample_request_command.
-//   3. Wait until packet_size bytes have arrived after the saved position. If
-//      they don't arrive within 500 ms, print a timeout message and go back
-//      to step 1.
-//   4. Recompute the CRC over the received batch and compare it to the
-//      received CRC. On a mismatch, print a message and set the LED magenta
-//      (red + blue).
-//   5. Otherwise, average the batch and set the LED: blue for cold, yellow
-//      for warm, red for hot. You pick the bands.
+bool button_pressed(lab1::input_pin& p_s1, lab1::input_pin& p_s2)
+{
+  return p_s1.level() || !p_s2.level();
+}
+
+void set_rgb(lab1::output_pin& p_red,
+             lab1::output_pin& p_green,
+             lab1::output_pin& p_blue,
+             bool p_red_on,
+             bool p_green_on,
+             bool p_blue_on)
+{
+  p_red.level(p_red_on);
+  p_green.level(p_green_on);
+  p_blue.level(p_blue_on);
+}
+
 void display_task(void*)
 {
+  msp0g::msp0g_iomux uart_tx(uart_tx_config, {});
+  msp0g::msp0g_iomux uart_rx(uart_rx_config, {});
+  serial_driver serial(uart_settings, msp0g::uartx::uart1);
+  lab6::crc32_hardware crc;
+
+  msp0g::msp0g_inpin s1(
+    sw1_pin, { .resistor = lab1::pin_resistor::pull_down });
+  msp0g::msp0g_inpin s2(
+    sw2_pin, { .resistor = lab1::pin_resistor::pull_up });
+  msp0g::msp0g_outpin red(red_led_pin);
+  msp0g::msp0g_outpin green(green_led_pin);
+  msp0g::msp0g_outpin blue(blue_led_pin);
+
+  set_rgb(red, green, blue, false, false, false);
+
+  auto const receive_buffer = serial.receive_buffer();
+  constexpr TickType_t receive_timeout = pdMS_TO_TICKS(500);
+  constexpr TickType_t poll_delay = pdMS_TO_TICKS(1);
+
   while (true) {
+    //button check
+    while (!button_pressed(s1, s2)) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    //debounce
+    vTaskDelay(pdMS_TO_TICKS(20));
+    if (!button_pressed(s1, s2)) {
+      continue;
+    }
+
+    std::size_t const start_cursor = serial.receive_cursor();
+    constexpr std::array<std::uint8_t, 1> request{
+      sample_request_command
+    };
+    serial.write(request);
+
+    TickType_t const start_tick = xTaskGetTickCount();
+    bool packet_ready = false;
+
+    while ((xTaskGetTickCount() - start_tick) < receive_timeout) {
+      std::size_t const cursor = serial.receive_cursor();
+      std::size_t const received =
+        (cursor + receive_buffer.size() - start_cursor) %
+        receive_buffer.size();
+
+      if (received >= packet_size) {
+        packet_ready = true;
+        break;
+      }
+
+      vTaskDelay(poll_delay);
+    }
+
+    if (!packet_ready) {
+      std::printf("Timed out waiting for sensor packet\n");
+      set_rgb(red, green, blue, false, false, false);
+    } else {
+      std::array<std::uint8_t, packet_size> packet{};
+
+      for (std::size_t index = 0; index < packet.size(); index++) {
+        packet[index] =
+          receive_buffer[(start_cursor + index) % receive_buffer.size()];
+      }
+
+      temperature_batch samples{};
+      auto* sample_bytes =
+        reinterpret_cast<std::uint8_t*>(samples.data());
+
+      for (std::size_t index = 0; index < sizeof(samples); index++) {
+        sample_bytes[index] = packet[index];
+      }
+
+      std::uint32_t received_crc = 0;
+
+      for (std::size_t index = 0; index < sizeof(received_crc); index++) {
+        received_crc |=
+          static_cast<std::uint32_t>(packet[sizeof(samples) + index]) <<
+          (index * 8U);
+      }
+
+      crc.reset();
+      crc.update(std::span<std::uint8_t const>{ packet.data(),
+                                                sizeof(samples) });
+
+      if (crc.checksum() != received_crc) {
+        std::printf("CRC mismatch\n");
+        set_rgb(red, green, blue, true, false, true);
+      } else {
+        std::int32_t sum = 0;
+
+        for (auto const sample : samples) {
+          sum += sample;
+        }
+
+        std::int32_t const average =
+          sum / static_cast<std::int32_t>(samples.size());
+
+        // uncomment for debugging/verifying
+        // std::printf("Average temperature: %ld.%ld C\n",
+        //             static_cast<long>(average / 10),
+        //             static_cast<long>(average % 10));
+
+        if (average < 250) {
+          set_rgb(red, green, blue, false, false, true);
+        } else if (average < 350) {
+          set_rgb(red, green, blue, true, true, false);
+        } else {
+          set_rgb(red, green, blue, true, false, false);
+        }
+      }
+    }
+
+    while (button_pressed(s1, s2)) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
   }
 }
 
@@ -621,7 +595,7 @@ constexpr device_role this_device = device_role::sensor;
 // Application entry point (professor's starter code with sensor setup added).
 int main()
 {
-    std::printf("Hello, World\n");
+    //std::printf("Hello, World\n");
 
     // The role is known at compile time, so only the selected setup runs.
     if constexpr (this_device == device_role::sensor) {
@@ -639,12 +613,15 @@ int main()
             batch_queue_buffer,         // Memory for the actual data.
             &batch_queue_storage);      // Memory for queue control information.
 
-        // (Eslin) Create one shared UART object using Koby's driver.
-        // Static keeps it alive for both tasks after the scheduler starts.
-        // UART1 is selected for now; Koby still needs to verify the pin setup
-        // and the physical TX/RX link with the team.
+        // Configure the UART1 pins before constructing the UART driver.
+        // These objects must outlive the tasks that use the peripheral.
+        static msp0g::msp0g_iomux uart_tx(uart_tx_config, {});
+        static msp0g::msp0g_iomux uart_rx(uart_rx_config, {});
+
+        // Create one shared UART object. Static keeps it alive for both
+        // request_task and transmit_task after the scheduler starts.
         static serial_driver uart(
-            lab6::serial::settings{},   // Default baud rate: 115200, 8N1.
+            uart_settings,
             msp0g::uartx::uart1);
 
         // Both tasks use the same driver through the professor's interface.
@@ -661,13 +638,19 @@ int main()
             request_task_stack,      // This task's own stack.
             &request_task_tcb);      // This task's own control block.
 
-        // (Eslin) Create Dylan's sampler task. It is meant to use the shared
-        // semaphore and queue directly, so I pass nullptr for its argument.
+        // Pass the sampler the same semaphore and queue used by the request
+        // and transmit tasks.  The context has static storage duration, so it
+        // remains valid for the entire lifetime of the task.
+        static msp0g::sampler_context sampler_context{
+            sample_request,
+            batch_queue
+        };
+
         xTaskCreateStatic(
-            sampler_task,
+            msp0g::sampler_task,
             "sampler_task",
             task_stack_words,
-            nullptr,
+            &sampler_context,
             tskIDLE_PRIORITY + 1,
             sampler_task_stack,
             &sampler_task_tcb);

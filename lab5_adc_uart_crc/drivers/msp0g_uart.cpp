@@ -243,10 +243,9 @@ void msp0g_uart::apply_config(const settings& p_settings)
   // BRD = uart_clock / (16 * baud_rate). Multiplying BRD by 64
   // combines the integer divisor and 6-bit fractional divisor.
   // adding (p_settings.baud_rate / 2) results in rounded
-  // integer rather than truncated 
+  // integer rather than truncated
   std::uint32_t baud_divisor =
-    ((uart_clock * 4) + (p_settings.baud_rate / 2)) /
-    p_settings.baud_rate;
+    ((uart_clock * 4) + (p_settings.baud_rate / 2)) / p_settings.baud_rate;
 
   *ibrd = baud_divisor >> 6;
   *fbrd = baud_divisor & 0x3F;
@@ -275,15 +274,14 @@ void msp0g_uart::apply_config(const settings& p_settings)
       break;
 
     case settings::parity::forced0:
-      line_control |=
-        parity_enable_mask | even_parity_mask | stick_parity_mask;
+      line_control |= parity_enable_mask | even_parity_mask | stick_parity_mask;
       break;
   }
 
   *lcrh = line_control;
 
-  *ctl0 = receive_enable_mask | transmit_enable_mask | fifo_enable_mask |
-          enable_mask;
+  *ctl0 =
+    receive_enable_mask | transmit_enable_mask | fifo_enable_mask | enable_mask;
 }
 
 }  // namespace msp0g
