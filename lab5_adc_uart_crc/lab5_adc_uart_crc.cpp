@@ -520,10 +520,10 @@ void display_task(void*)
         std::int32_t const average =
           sum / static_cast<std::int32_t>(samples.size());
 
-        // uncomment for debugging/verifying
-        // std::printf("Average temperature: %ld.%ld C\n",
-        //             static_cast<long>(average / 10),
-        //             static_cast<long>(average % 10));
+        //uncomment for debugging/verifying
+        std::printf("Average temperature: %ld.%ld C\n",
+                    static_cast<long>(average / 10),
+                    static_cast<long>(average % 10));
 
         if (average < 250) {
           set_rgb(red, green, blue, false, false, true);
@@ -589,7 +589,7 @@ enum class device_role : std::uint8_t
 
 // Shared starter-code role selection. Change to display for Sonal's board.
 // Sensor runs three tasks; display runs one.
-constexpr device_role this_device = device_role::sensor;
+constexpr device_role this_device = device_role::display;
 }  // namespace
 
 // Application entry point (professor's starter code with sensor setup added).
@@ -674,7 +674,7 @@ int main()
             tskIDLE_PRIORITY + 1,
             transmit_task_stack,
             &transmit_task_tcb);
-
+            
     } else {
 
         // Professor's starter code: create only the display task (Sonal).
