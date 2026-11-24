@@ -97,6 +97,7 @@
     "Sonal",
     "SWCLK",
     "SWDIO",
-    "TIMA"
+    "TIMA",
+    "deadband"
   ]
 }
