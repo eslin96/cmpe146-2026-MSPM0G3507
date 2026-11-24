@@ -30,12 +30,21 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "ti_msp_dl_config.h"
+#include "../pwm/fan_pwm.hpp"
+#include "mspm0_pwm.hpp"
 
 int main(void)
 {
-    SYSCFG_DL_init();
+  // Create a PWM hardware driver running at 25 kHz.
+  fan_controller::mspm0_pwm pwm_hardware(25'000U);
 
-    while (1) {
-    }
+  // Connect the portable fan driver to the hardware driver.
+  fan_controller::fan_pwm fan(pwm_hardware);
+
+  // Set the initial fan PWM duty cycle to 50%.
+  fan.set_duty_cycle(50U);
+
+  while (1) {
+    // PWM continues running in hardware.
+  }
 }
