@@ -6,21 +6,19 @@ namespace fan_controller {
 
 // Configure TIMA1 to generate PWM at the requested frequency.
 mspm0_pwm::mspm0_pwm(std::uint32_t p_frequency_hz)
-  : m_frequency_hz(0U),
-    m_load_value(0U)
+  : m_frequency_hz(0U)
+  , m_load_value(0U)
 {
   // Default BUSCLK frequency is 32 MHz.
   constexpr std::uint32_t timer_clock_hz = 32'000'000U;
 
   // Reject frequencies outside the supported calculation range.
-  if (p_frequency_hz == 0U ||
-      p_frequency_hz > timer_clock_hz / 2U) {
+  if (p_frequency_hz == 0U || p_frequency_hz > timer_clock_hz / 2U) {
     return;
   }
 
   // Calculate the timer period.
-  std::uint32_t timer_counts =
-    timer_clock_hz / p_frequency_hz;
+  std::uint32_t timer_counts = timer_clock_hz / p_frequency_hz;
 
   // TIMA1 has a 16-bit counter.
   // Reject periods that do not fit in the timer.
@@ -33,9 +31,7 @@ mspm0_pwm::mspm0_pwm(std::uint32_t p_frequency_hz)
 
   // Reset TIMA1.
   // 0xB1 is the reset key.
-  TIMA1->GPRCM.RSTCTL = (0xB1U << 24) |
-                        (1U << 1) |
-                        (1U << 0);
+  TIMA1->GPRCM.RSTCTL = (0xB1U << 24) | (1U << 1) | (1U << 0);
 
   // Enable power to GPIOA without resetting its other pins.
   // 0x26 is the power key and bit 0 enables power.
@@ -67,9 +63,7 @@ mspm0_pwm::mspm0_pwm(std::uint32_t p_frequency_hz)
   // Bit 29: Start counting from zero when enabled.
   // Bit 5: Select upward counting.
   // Bit 1: Repeat continuously.
-  TIMA1->COUNTERREGS.CTRCTL = (1U << 29) |
-                              (1U << 5) |
-                              (1U << 1);
+  TIMA1->COUNTERREGS.CTRCTL = (1U << 29) | (1U << 5) | (1U << 1);
 
   // Configure channel 0 for compare mode.
   // Bit 17 = 0 selects compare instead of capture.
@@ -84,15 +78,13 @@ mspm0_pwm::mspm0_pwm(std::uint32_t p_frequency_hz)
   // Select the timer signal generator as the output source.
   TIMA1->COUNTERREGS.OCTL_01[0] = 0U;
 
-  
   // Configure channel 0 as an output.
   TIMA1->COMMONREGS.CCPD = (1U << 0);
 
   // Route TIMA1 CCP0 to PA10.
   // Bits 2 and 0 select peripheral function 5.
   // Bit 7 connects the pin to the peripheral.
-  IOMUX->SECCFG.PINCM[IOMUX_PINCM21] =
-    (1U << 7) | (1U << 2) | (1U << 0);
+  IOMUX->SECCFG.PINCM[IOMUX_PINCM21] = (1U << 7) | (1U << 2) | (1U << 0);
 
   // Enable PA10 output.
   GPIOA->DOESET31_0 = (1U << 10);
@@ -103,7 +95,6 @@ mspm0_pwm::mspm0_pwm(std::uint32_t p_frequency_hz)
   // Start the timer counter.
   TIMA1->COUNTERREGS.CTRCTL |= (1U << 0);
 }
-
 
 // Return the configured PWM frequency.
 std::uint32_t mspm0_pwm::driver_frequency()
@@ -140,8 +131,7 @@ void mspm0_pwm::driver_duty_cycle(std::uint16_t p_duty_cycle)
   std::uint32_t timer_counts = m_load_value + 1U;
 
   std::uint32_t compare_value =
-    (static_cast<std::uint32_t>(p_duty_cycle) *
-     timer_counts + 32767U) / 65535U;
+    (static_cast<std::uint32_t>(p_duty_cycle) * timer_counts + 32767U) / 65535U;
 
   // Keep the compare event inside the timer period.
   if (compare_value == 0U) {
@@ -157,8 +147,7 @@ void mspm0_pwm::driver_duty_cycle(std::uint16_t p_duty_cycle)
 
   // Bit 0: Set output HIGH when the counter reaches zero.
   // Bit 10: Set output LOW when counting up reaches compare.
-  TIMA1->COUNTERREGS.CCACT_01[0] =
-    (1U << 0) | (1U << 10);
+  TIMA1->COUNTERREGS.CCACT_01[0] = (1U << 0) | (1U << 10);
 }
 
 }  // namespace fan_controller

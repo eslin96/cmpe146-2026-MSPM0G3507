@@ -55,30 +55,31 @@
 #include <ti/driverlib/m0p/dl_core.h>
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
-/*
- *  ======== SYSCFG_DL_init ========
- *  Perform all required MSP DL initialization
- *
- *  This function should be called once at a point before any use of
- *  MSP DL.
- */
+  /*
+   *  ======== SYSCFG_DL_init ========
+   *  Perform all required MSP DL initialization
+   *
+   *  This function should be called once at a point before any use of
+   *  MSP DL.
+   */
 
-/* clang-format off */
+  /* clang-format off */
 
 #define POWER_STARTUP_DELAY                                                (16)
 
 
 #define CPUCLK_FREQ                                                     32000000
 
-/* clang-format on */
+  /* clang-format on */
 
-void SYSCFG_DL_init(void);
-void SYSCFG_DL_initPower(void);
-void SYSCFG_DL_GPIO_init(void);
-void SYSCFG_DL_SYSCTL_init(void);
+  void SYSCFG_DL_init(void);
+  void SYSCFG_DL_initPower(void);
+  void SYSCFG_DL_GPIO_init(void);
+  void SYSCFG_DL_SYSCTL_init(void);
 
 #ifdef __cplusplus
 }
