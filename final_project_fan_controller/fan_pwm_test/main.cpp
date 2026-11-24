@@ -30,8 +30,27 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "../pwm/fan_control.hpp"
 #include "../pwm/fan_pwm.hpp"
 #include "mspm0_pwm.hpp"
+
+// Simulate temperature and RPM readings through the debugger.
+float volatile temperature = 45.0F;
+std::uint32_t volatile actual_rpm = 1400U;
+
+// Simulate the validity of the sensor readings.
+bool volatile temperature_valid = true;
+bool volatile rpm_valid = true;
+
+// Request a controller update through the debugger.
+std::uint32_t volatile update_control = 1U;
+
+// Store the last completed update.
+std::uint32_t volatile completed_updates = 0U;
+
+// Display the controller results through the debugger.
+std::uint32_t volatile target_rpm = 0U;
+std::uint8_t volatile duty_cycle = 0U;
 
 int main(void)
 {
@@ -41,10 +60,28 @@ int main(void)
   // Connect the portable fan driver to the hardware driver.
   fan_controller::fan_pwm fan(pwm_hardware);
 
-  // Set the initial fan PWM duty cycle to 50%.
-  fan.set_duty_cycle(50U);
+  // Configure the temperature curve and RPM controller.
+  fan_controller::fan_control_config config{ 30.0F, 60.0F, 800U, 2000U,
+                                             30U,   5U,    100U };
+
+  // Create the closed-loop fan controller.
+  fan_controller::fan_control controller(fan, config);
 
   while (1) {
-    // PWM continues running in hardware.
+    // Read the requested update number.
+    std::uint32_t request = update_control;
+
+    // Update the controller when a new request is received.
+    if (request != completed_updates) {
+      auto result = controller.update(
+        temperature, actual_rpm, temperature_valid, rpm_valid);
+
+      // Store the controller results.
+      target_rpm = result.target_rpm;
+      duty_cycle = result.duty_cycle;
+
+      // Mark the requested update as completed.
+      completed_updates = request;
+    }
   }
 }
