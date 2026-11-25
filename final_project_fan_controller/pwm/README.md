@@ -127,7 +127,7 @@ Create the objects once and call `update()` periodically from a single control t
 
 Person 1 supplies temperature, Person 3 supplies RPM, and Person 5 connects these inputs and controller results to the FreeRTOS tasks and queues. Person 4 can display the latest results. The integration task must check freshness and validity, including missing sensor data. Queue names, message layouts, task priorities, and update intervals still require team agreement.
 
-The CCS test project links the `pwm` folder. If the linked path is specific to the original computer, update it to the local checkout when importing the test project.
+The CCS test project includes the `pwm` folder directly. If you use a linked-folder setup in another checkout, point it to that checkout's local `pwm` directory rather than retaining an absolute path from another computer.
 
 ## Controller Verification
 

@@ -21,7 +21,7 @@
 		<link>
 			<name>pwm</name>
 			<type>2</type>
-			<location>C:/Users/Spec/cmpe146-final-project/final_project_fan_controller/pwm</location>
+			<locationURI>PARENT-1-PROJECT_LOC/pwm</locationURI>
 		</link>
 	</linkedResources>
 </projectDescription>
